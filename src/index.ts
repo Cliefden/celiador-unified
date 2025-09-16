@@ -38,9 +38,11 @@ app.use(express.urlencoded({ extended: true }));
 // CORS configuration
 const corsOptions = {
   origin: process.env.NODE_ENV === 'production' 
-    ? ['https://celiador-web.vercel.app', 'https://celiador.ai']
+    ? ['https://celiador-web.vercel.app', 'https://celiador.ai', 'https://www.celiador.ai']
     : ['http://localhost:3000', 'http://localhost:3001'],
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
 };
 app.use(cors(corsOptions));
 
@@ -213,13 +215,17 @@ setInterval(processJobQueue, 5000);
 // Authentication middleware
 const authenticateUser = async (req: any, res: any, next: any) => {
   try {
+    console.log(`${req.method} ${req.path} - Auth check`);
     const authHeader = req.headers.authorization;
+    
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      console.log('Missing or invalid authorization header');
       return res.status(401).json({ error: 'Missing or invalid authorization header' });
     }
 
     if (!supabase) {
       // If Supabase not available, create a mock user for development
+      console.log('No Supabase available, using mock user');
       req.user = { id: 'dev-user', email: 'dev@example.com' };
       return next();
     }
@@ -228,9 +234,11 @@ const authenticateUser = async (req: any, res: any, next: any) => {
     const { data: { user }, error } = await supabase.auth.getUser(token);
     
     if (error || !user) {
+      console.log('Invalid token:', error?.message);
       return res.status(401).json({ error: 'Invalid token' });
     }
 
+    console.log('User authenticated:', user.id);
     req.user = user;
     next();
   } catch (error) {
@@ -275,11 +283,15 @@ app.get('/api/status', (req: any, res: any) => {
 // Projects endpoints
 app.get('/projects', authenticateUser, async (req: any, res: any) => {
   try {
+    console.log('GET /projects - User:', req.user?.id);
+    
     if (!supabaseService) {
+      console.log('No Supabase service available');
       return res.json([]);
     }
 
     const projects = await db.getProjectsByUserId(req.user.id);
+    console.log(`Found ${projects.length} projects for user ${req.user.id}`);
     res.json(projects);
   } catch (error) {
     console.error('Projects fetch error:', error);
