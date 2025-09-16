@@ -474,6 +474,152 @@ app.patch('/jobs/:id', async (req: any, res: any) => {
   }
 });
 
+// Preview service endpoints
+app.post('/projects/:id/preview/start', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const { name, type } = req.body;
+    
+    console.log(`Starting preview for project ${id}:`, { name, type });
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    // Simulate preview creation
+    const previewId = `preview_${Date.now()}`;
+    const preview = {
+      id: previewId,
+      projectId: id,
+      name: name || 'Project Preview',
+      type: type || 'nextjs',
+      status: 'starting',
+      url: `https://preview-${previewId}.mock.com`,
+      createdAt: new Date().toISOString()
+    };
+
+    // In a real implementation, you'd start a preview container/service here
+    console.log(`Preview ${previewId} created for project ${id}`);
+    
+    res.status(201).json(preview);
+  } catch (error) {
+    console.error('Failed to start preview:', error);
+    res.status(500).json({ error: 'Failed to start preview' });
+  }
+});
+
+app.delete('/projects/:id/preview/:previewId', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id, previewId } = req.params;
+    
+    console.log(`Stopping preview ${previewId} for project ${id}`);
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    // In a real implementation, you'd stop the preview container/service here
+    console.log(`Preview ${previewId} stopped for project ${id}`);
+    
+    res.json({ success: true, message: `Preview ${previewId} stopped` });
+  } catch (error) {
+    console.error('Failed to stop preview:', error);
+    res.status(500).json({ error: 'Failed to stop preview' });
+  }
+});
+
+app.get('/projects/:id/preview/:previewId/status', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id, previewId } = req.params;
+    
+    console.log(`Getting status for preview ${previewId} of project ${id}`);
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    // Mock preview status
+    const status = {
+      id: previewId,
+      projectId: id,
+      status: 'running',
+      url: `https://preview-${previewId}.mock.com`,
+      logs: ['Preview service started', 'Application deployed', 'Ready to serve requests'],
+      updatedAt: new Date().toISOString()
+    };
+    
+    res.json(status);
+  } catch (error) {
+    console.error('Failed to get preview status:', error);
+    res.status(500).json({ error: 'Failed to get preview status' });
+  }
+});
+
+app.get('/projects/:id/preview/list', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    
+    console.log(`Listing previews for project ${id}`);
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    // Mock preview list - in real implementation, you'd query preview database/service
+    const previews = [
+      {
+        id: `preview_${Date.now() - 3600000}`,
+        projectId: id,
+        name: 'Main Preview',
+        type: 'nextjs',
+        status: 'running',
+        url: `https://preview-main.mock.com`,
+        createdAt: new Date(Date.now() - 3600000).toISOString()
+      }
+    ];
+    
+    res.json(previews);
+  } catch (error) {
+    console.error('Failed to list previews:', error);
+    res.status(500).json({ error: 'Failed to list previews' });
+  }
+});
+
+// File upload endpoint
+app.post('/projects/:id/files/upload', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const { fileName, content, path } = req.body;
+    
+    console.log(`Uploading file to project ${id}:`, fileName);
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    // Mock file upload - in real implementation, you'd save to storage
+    const uploadResult = {
+      success: true,
+      fileName,
+      path: path || '/',
+      size: content?.length || 0,
+      uploadedAt: new Date().toISOString(),
+      url: `https://storage.mock.com/${id}/${fileName}`
+    };
+    
+    console.log(`File ${fileName} uploaded to project ${id}`);
+    res.json(uploadResult);
+  } catch (error) {
+    console.error('Failed to upload file:', error);
+    res.status(500).json({ error: 'Failed to upload file' });
+  }
+});
+
 // Start server
 const server = app.listen(port, '0.0.0.0', () => {
   console.log('=== SERVER STARTED SUCCESSFULLY ===');
