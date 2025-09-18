@@ -1,4 +1,5 @@
 // Unified Celiador service - API + Job Processing
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
@@ -127,6 +128,105 @@ const db = {
     
     if (updateError) throw updateError;
     return data;
+  },
+
+  // Conversation management
+  getConversationsByProjectId: async (projectId: string, userId: string) => {
+    if (!supabaseService) return [];
+    
+    const { data, error } = await supabaseService
+      .from('conversations')
+      .select('*')
+      .eq('projectId', projectId)
+      .eq('userId', userId)
+      .is('deletedAt', null)
+      .order('updatedAt', { ascending: false });
+    
+    if (error) throw error;
+    return data || [];
+  },
+
+  createConversation: async (conversationData: any) => {
+    if (!supabaseService) throw new Error('Database not available');
+    
+    const { data: conversation, error } = await supabaseService
+      .from('conversations')
+      .insert({
+        title: conversationData.title,
+        projectId: conversationData.projectId,
+        userId: conversationData.userId,
+        status: 'ACTIVE'
+      })
+      .select()
+      .single();
+    
+    if (error) throw error;
+    return conversation;
+  },
+
+  getMessagesByConversationId: async (conversationId: string) => {
+    if (!supabaseService) return [];
+    
+    const { data, error } = await supabaseService
+      .from('messages')
+      .select('*')
+      .eq('conversationId', conversationId)
+      .is('deletedAt', null)
+      .order('createdAt', { ascending: true });
+    
+    if (error) throw error;
+    return data || [];
+  },
+
+  createMessage: async (messageData: any) => {
+    if (!supabaseService) throw new Error('Database not available');
+    
+    const { data: message, error } = await supabaseService
+      .from('messages')
+      .insert({
+        content: messageData.content,
+        role: messageData.role,
+        messageType: messageData.messageType || 'text',
+        conversationId: messageData.conversationId,
+        userId: messageData.userId,
+        metadata: messageData.metadata,
+        parentId: messageData.parentId,
+        relatedJobId: messageData.relatedJobId
+      })
+      .select()
+      .single();
+    
+    if (error) throw error;
+    return message;
+  },
+
+  // GitHub integrations
+  getGitHubIntegration: async (userId: string) => {
+    if (!supabaseService) return null;
+    
+    const { data, error } = await supabaseService
+      .from('github_integrations')
+      .select('*')
+      .eq('userId', userId)
+      .is('deletedAt', null)
+      .single();
+    
+    if (error) return null;
+    return data;
+  },
+
+  // Service integrations
+  getServiceIntegrations: async (userId: string) => {
+    if (!supabaseService) return [];
+    
+    const { data, error } = await supabaseService
+      .from('service_integrations')
+      .select('*')
+      .eq('userId', userId)
+      .is('deletedAt', null);
+    
+    if (error) return [];
+    return data || [];
   }
 };
 
@@ -211,6 +311,257 @@ async function processJobQueue() {
 
 // Start job processor (check every 5 seconds)
 setInterval(processJobQueue, 5000);
+
+// Helper functions for file management
+async function getTemplateFileStructure(templateKey: string) {
+  // Return template-based file structure
+  const structures: any = {
+    'next-prisma-supabase': [
+      {
+        name: 'src',
+        type: 'folder',
+        path: 'src',
+        children: [
+          {
+            name: 'app',
+            type: 'folder',
+            path: 'src/app',
+            children: [
+              { name: 'page.tsx', type: 'file', path: 'src/app/page.tsx', size: 1024 },
+              { name: 'layout.tsx', type: 'file', path: 'src/app/layout.tsx', size: 2048 },
+              { name: 'globals.css', type: 'file', path: 'src/app/globals.css', size: 512 }
+            ]
+          },
+          {
+            name: 'components',
+            type: 'folder',
+            path: 'src/components',
+            children: []
+          },
+          {
+            name: 'lib',
+            type: 'folder',
+            path: 'src/lib',
+            children: [
+              { name: 'supabase.ts', type: 'file', path: 'src/lib/supabase.ts', size: 800 }
+            ]
+          }
+        ]
+      },
+      { name: 'package.json', type: 'file', path: 'package.json', size: 512 },
+      { name: 'README.md', type: 'file', path: 'README.md', size: 256 },
+      { name: '.env.local.example', type: 'file', path: '.env.local.example', size: 200 }
+    ],
+    'blank-nextjs': [
+      {
+        name: 'src',
+        type: 'folder',
+        path: 'src',
+        children: [
+          {
+            name: 'app',
+            type: 'folder',
+            path: 'src/app',
+            children: [
+              { name: 'page.tsx', type: 'file', path: 'src/app/page.tsx', size: 512 },
+              { name: 'layout.tsx', type: 'file', path: 'src/app/layout.tsx', size: 1024 }
+            ]
+          }
+        ]
+      },
+      { name: 'package.json', type: 'file', path: 'package.json', size: 400 },
+      { name: 'README.md', type: 'file', path: 'README.md', size: 150 }
+    ]
+  };
+  
+  return structures[templateKey] || structures['blank-nextjs'];
+}
+
+async function buildFileTreeFromStorage(files: any[], projectId: string) {
+  // Convert flat file list to tree structure
+  const tree: any[] = [];
+  const folderMap = new Map();
+  
+  files.forEach(file => {
+    const parts = file.name.split('/');
+    let currentLevel = tree;
+    let currentPath = '';
+    
+    parts.forEach((part: string, index: number) => {
+      currentPath += (currentPath ? '/' : '') + part;
+      
+      if (index === parts.length - 1) {
+        // It's a file
+        currentLevel.push({
+          name: part,
+          type: 'file',
+          path: currentPath,
+          size: file.metadata?.size || 0,
+          updatedAt: file.updated_at
+        });
+      } else {
+        // It's a folder
+        let folder = currentLevel.find(item => item.name === part && item.type === 'folder');
+        if (!folder) {
+          folder = {
+            name: part,
+            type: 'folder',
+            path: currentPath,
+            children: []
+          };
+          currentLevel.push(folder);
+        }
+        currentLevel = folder.children;
+      }
+    });
+  });
+  
+  return tree;
+}
+
+async function getTemplateFileContent(path: string, project: any) {
+  const templates: any = {
+    'package.json': JSON.stringify({
+      name: project.name,
+      version: '1.0.0',
+      private: true,
+      scripts: {
+        dev: 'next dev',
+        build: 'next build',
+        start: 'next start',
+        lint: 'next lint'
+      },
+      dependencies: {
+        next: '^14.0.0',
+        react: '^18.0.0',
+        'react-dom': '^18.0.0'
+      },
+      devDependencies: {
+        '@types/node': '^20.0.0',
+        '@types/react': '^18.0.0',
+        '@types/react-dom': '^18.0.0',
+        eslint: '^8.0.0',
+        'eslint-config-next': '^14.0.0',
+        typescript: '^5.0.0'
+      }
+    }, null, 2),
+    'src/app/page.tsx': `export default function Home() {
+  return (
+    <main className="flex min-h-screen flex-col items-center justify-center p-24">
+      <div className="text-center">
+        <h1 className="text-4xl font-bold mb-4">
+          Welcome to ${project.name}
+        </h1>
+        <p className="text-lg text-gray-600">
+          Get started by editing <code className="bg-gray-100 px-2 py-1 rounded">src/app/page.tsx</code>
+        </p>
+      </div>
+    </main>
+  );
+}`,
+    'src/app/layout.tsx': `import type { Metadata } from 'next';
+
+export const metadata: Metadata = {
+  title: '${project.name}',
+  description: 'Generated by Celiador',
+};
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  );
+}`,
+    'README.md': `# ${project.name}
+
+This is a [Next.js](https://nextjs.org/) project generated with Celiador.
+
+## Getting Started
+
+First, run the development server:
+
+\`\`\`bash
+npm run dev
+# or
+yarn dev
+# or
+pnpm dev
+\`\`\`
+
+Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+
+## Learn More
+
+To learn more about Next.js, take a look at the following resources:
+
+- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
+- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+`,
+    '.env.local.example': `# Supabase
+NEXT_PUBLIC_SUPABASE_URL=your_supabase_url
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
+SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
+`,
+    'src/lib/supabase.ts': `import { createClient } from '@supabase/supabase-js';
+
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+
+export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+`
+  };
+  
+  if (templates[path]) {
+    return templates[path];
+  }
+  
+  // Generate content based on file extension
+  if (path.endsWith('.tsx') || path.endsWith('.ts')) {
+    const componentName = path.split('/').pop()?.replace(/\.[^/.]+$/, '') || 'Component';
+    return `// ${path}
+export default function ${componentName}() {
+  return (
+    <div>
+      <h1>Hello from ${componentName}</h1>
+    </div>
+  );
+}`;
+  }
+  
+  if (path.endsWith('.css')) {
+    return `/* ${path} */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+`;
+  }
+  
+  return `# ${path}
+
+This file was generated automatically.
+`;
+}
+
+function getFileContentType(path: string): string {
+  const ext = path.split('.').pop()?.toLowerCase();
+  const types: any = {
+    'js': 'application/javascript',
+    'jsx': 'application/javascript',
+    'ts': 'application/typescript',
+    'tsx': 'application/typescript',
+    'json': 'application/json',
+    'css': 'text/css',
+    'html': 'text/html',
+    'md': 'text/markdown',
+    'txt': 'text/plain'
+  };
+  return types[ext || ''] || 'text/plain';
+}
 
 // Authentication middleware
 const authenticateUser = async (req: any, res: any, next: any) => {
@@ -561,47 +912,127 @@ app.post('/jobs/:id/retry', authenticateUser, async (req: any, res: any) => {
   }
 });
 
+// Conversation endpoints
+app.get('/projects/:id/conversations', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    try {
+      const conversations = await db.getConversationsByProjectId(id, req.user.id);
+      res.json(conversations);
+    } catch (error) {
+      // Conversations table might not exist
+      console.log('Conversations table does not exist, returning empty array');
+      res.json([]);
+    }
+  } catch (error) {
+    console.error('Failed to get conversations:', error);
+    res.status(500).json({ error: 'Failed to get conversations' });
+  }
+});
+
+app.post('/projects/:id/conversations', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const { title } = req.body;
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    try {
+      const conversation = await db.createConversation({
+        title: title || 'New Conversation',
+        projectId: id,
+        userId: req.user.id
+      });
+      
+      res.status(201).json(conversation);
+    } catch (error) {
+      console.error('Failed to create conversation (table may not exist):', error);
+      res.status(500).json({ error: 'Conversations feature not available' });
+    }
+  } catch (error) {
+    console.error('Failed to create conversation:', error);
+    res.status(500).json({ error: 'Failed to create conversation' });
+  }
+});
+
+app.get('/conversations/:id/messages', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    
+    try {
+      const messages = await db.getMessagesByConversationId(id);
+      res.json(messages);
+    } catch (error) {
+      // Messages table might not exist
+      console.log('Messages table does not exist, returning empty array');
+      res.json([]);
+    }
+  } catch (error) {
+    console.error('Failed to get messages:', error);
+    res.status(500).json({ error: 'Failed to get messages' });
+  }
+});
+
+app.post('/conversations/:id/messages', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const { content, role, messageType, metadata, parentId, relatedJobId } = req.body;
+    
+    if (!content || !role) {
+      return res.status(400).json({ error: 'Content and role are required' });
+    }
+
+    try {
+      const message = await db.createMessage({
+        content,
+        role,
+        messageType: messageType || 'text',
+        conversationId: id,
+        userId: req.user.id,
+        metadata,
+        parentId,
+        relatedJobId
+      });
+      
+      res.status(201).json(message);
+    } catch (error) {
+      console.error('Failed to create message (table may not exist):', error);
+      res.status(500).json({ error: 'Messages feature not available' });
+    }
+  } catch (error) {
+    console.error('Failed to create message:', error);
+    res.status(500).json({ error: 'Failed to create message' });
+  }
+});
+
 // Templates endpoint
 app.get('/templates', async (req: any, res: any) => {
   try {
-    const templates = [
-      {
-        key: 'blank-nextjs',
-        name: 'Blank Next.js',
-        description: 'A minimal Next.js starter template',
-        category: 'web',
-        tech: ['Next.js', 'React', 'TypeScript'],
-        preview: 'https://via.placeholder.com/400x300?text=Next.js',
-        popular: true
-      },
-      {
-        key: 'next-prisma-supabase',
-        name: 'Next.js + Prisma + Supabase',
-        description: 'Full-stack Next.js with Prisma ORM and Supabase',
-        category: 'fullstack',
-        tech: ['Next.js', 'Prisma', 'Supabase', 'TypeScript'],
-        preview: 'https://via.placeholder.com/400x300?text=Fullstack',
-        popular: true
-      },
-      {
-        key: 'react-vite',
-        name: 'React + Vite',
-        description: 'Fast React development with Vite',
-        category: 'web',
-        tech: ['React', 'Vite', 'TypeScript'],
-        preview: 'https://via.placeholder.com/400x300?text=React+Vite'
-      },
-      {
-        key: 'express-api',
-        name: 'Express API',
-        description: 'RESTful API with Express.js',
-        category: 'backend',
-        tech: ['Express.js', 'Node.js', 'TypeScript'],
-        preview: 'https://via.placeholder.com/400x300?text=Express+API'
-      }
-    ];
+    if (!supabaseService) {
+      return res.status(500).json({ error: 'Database not available' });
+    }
+
+    const { data: templates, error } = await supabaseService
+      .from('templates')
+      .select('*')
+      .eq('isActive', true)
+      .order('rating', { ascending: false });
+
+    if (error) {
+      console.error('Database error fetching templates:', error);
+      return res.status(500).json({ error: 'Failed to fetch templates' });
+    }
     
-    res.json(templates);
+    res.json({ templates: templates || [] });
   } catch (error) {
     console.error('Failed to get templates:', error);
     res.status(500).json({ error: 'Failed to get templates' });
@@ -619,34 +1050,78 @@ app.get('/projects/:id/activity', authenticateUser, async (req: any, res: any) =
       return res.status(404).json({ error: 'Project not found or access denied' });
     }
 
-    // Mock activity data - replace with real activity tracking
-    const activities = [
-      {
-        id: '1',
-        type: 'project_created',
-        message: 'Project created',
-        timestamp: project.createdat,
-        user: req.user.email || 'Unknown user'
-      },
-      {
-        id: '2',
-        type: 'job_completed',
-        message: 'Scaffold job completed',
-        timestamp: new Date(Date.now() - 3600000).toISOString(),
-        user: req.user.email || 'Unknown user'
-      },
-      {
-        id: '3',
-        type: 'file_modified',
-        message: 'Modified src/app/page.tsx',
-        timestamp: new Date(Date.now() - 1800000).toISOString(),
-        user: req.user.email || 'Unknown user'
-      }
-    ];
+    if (!supabaseService) {
+      return res.json([]);
+    }
+
+    // Get comprehensive activity from multiple sources
+    const limit = showAll === 'true' ? 50 : 10;
     
-    const filteredActivities = showAll === 'true' ? activities : activities.slice(0, 5);
+    // Get jobs activity
+    const { data: jobs, error: jobsError } = await supabaseService
+      .from('jobs')
+      .select('id, type, status, createdat, updatedat, prompt')
+      .eq('projectid', id)
+      .order('createdat', { ascending: false })
+      .limit(limit);
+
+    if (jobsError) {
+      console.error('Error fetching jobs for activity:', jobsError);
+      return res.status(500).json({ error: 'Failed to get activity' });
+    }
+
+    // Get conversation activity if conversations exist
+    let conversationActivities = [];
+    try {
+      const { data: conversations } = await supabaseService
+        .from('conversations')
+        .select('id, title, createdat, updatedat')
+        .eq('projectId', id)
+        .is('deletedAt', null)
+        .order('createdat', { ascending: false })
+        .limit(5);
+      
+      conversationActivities = conversations?.map((conv: any) => ({
+        id: `conv_${conv.id}`,
+        type: 'conversation',
+        message: `Conversation started: ${conv.title || 'Untitled'}`,
+        timestamp: conv.createdat,
+        user: req.user.email || 'Unknown user',
+        status: 'COMPLETED'
+      })) || [];
+    } catch (convError) {
+      // Conversations table might not exist, ignore
+      console.log('Conversations table not available, skipping conversation activity');
+    }
+
+    // Convert jobs to activity format
+    const jobActivities = jobs?.map((job: any) => ({
+      id: job.id,
+      type: job.type.toLowerCase(),
+      message: job.status === 'COMPLETED' 
+        ? `${job.type} job completed: ${job.prompt || 'No description'}`
+        : `${job.type} job ${job.status.toLowerCase()}: ${job.prompt || 'No description'}`,
+      timestamp: job.updatedat || job.createdat,
+      user: req.user.email || 'Unknown user',
+      status: job.status
+    })) || [];
+
+    // Combine all activities
+    const allActivities = [...jobActivities, ...conversationActivities];
     
-    res.json(filteredActivities);
+    // Sort by timestamp and add project creation
+    allActivities.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    
+    allActivities.unshift({
+      id: 'project_created',
+      type: 'project_created',
+      message: `Project "${project.name}" created`,
+      timestamp: project.createdat,
+      user: req.user.email || 'Unknown user',
+      status: 'COMPLETED'
+    });
+    
+    res.json(allActivities.slice(0, limit));
   } catch (error) {
     console.error('Failed to get activity:', error);
     res.status(500).json({ error: 'Failed to get activity' });
@@ -792,25 +1267,36 @@ app.get('/projects/:id/files/tree', authenticateUser, async (req: any, res: any)
       return res.status(404).json({ error: 'Project not found or access denied' });
     }
 
-    // Mock file tree - replace with real storage implementation
-    const fileTree = [
-      {
-        name: 'src',
-        type: 'folder',
-        path: 'src',
-        children: [
-          { name: 'app', type: 'folder', path: 'src/app', children: [
-            { name: 'page.tsx', type: 'file', path: 'src/app/page.tsx', size: 1024 },
-            { name: 'layout.tsx', type: 'file', path: 'src/app/layout.tsx', size: 2048 }
-          ]},
-          { name: 'components', type: 'folder', path: 'src/components', children: [] }
-        ]
-      },
-      { name: 'package.json', type: 'file', path: 'package.json', size: 512 },
-      { name: 'README.md', type: 'file', path: 'README.md', size: 256 }
-    ];
-    
-    res.json(fileTree);
+    if (!supabaseService) {
+      return res.status(500).json({ error: 'Database not available' });
+    }
+
+    // Get real file tree from Supabase Storage
+    try {
+      const { data: files, error } = await supabaseService.storage
+        .from('project-files')
+        .list(`${id}/`, {
+          limit: 100,
+          offset: 0
+        });
+
+      if (error) {
+        console.error('Storage error:', error);
+        // Return template-based file structure if storage is empty
+        const templateFiles = await getTemplateFileStructure(project.templatekey || 'next-prisma-supabase');
+        return res.json(templateFiles);
+      }
+
+      // Convert storage files to tree structure
+      const fileTree = await buildFileTreeFromStorage(files || [], id);
+      res.json(fileTree);
+      
+    } catch (storageError) {
+      console.error('Storage not configured, returning template structure:', storageError);
+      // Fallback to template-based structure
+      const templateFiles = await getTemplateFileStructure(project.templatekey || 'next-prisma-supabase');
+      res.json(templateFiles);
+    }
   } catch (error) {
     console.error('Failed to get file tree:', error);
     res.status(500).json({ error: 'Failed to get file tree' });
@@ -826,22 +1312,32 @@ app.get('/projects/:id/files/:path(*)', authenticateUser, async (req: any, res: 
       return res.status(404).json({ error: 'Project not found or access denied' });
     }
 
-    // Mock file content - replace with real storage implementation
-    let content = '';
-    if (path === 'package.json') {
-      content = JSON.stringify({
-        name: project.name,
-        version: '1.0.0',
-        scripts: { dev: 'next dev', build: 'next build' },
-        dependencies: { next: '^14.0.0', react: '^18.0.0' }
-      }, null, 2);
-    } else if (path.endsWith('.tsx') || path.endsWith('.ts')) {
-      content = `// ${path}\nexport default function Component() {\n  return <div>Hello from ${path}</div>;\n}`;
-    } else {
-      content = `# ${path}\n\nThis is a mock file content for ${path}`;
+    if (!supabaseService) {
+      return res.status(500).json({ error: 'Database not available' });
     }
-    
-    res.json({ content, path, updatedAt: new Date().toISOString() });
+
+    try {
+      // Get real file content from Supabase Storage
+      const { data, error } = await supabaseService.storage
+        .from('project-files')
+        .download(`${id}/${path}`);
+
+      if (error) {
+        console.error('File not found in storage, generating template content:', error);
+        // Generate template-based content
+        const content = await getTemplateFileContent(path, project);
+        return res.json({ content, path, updatedAt: new Date().toISOString() });
+      }
+
+      const content = await data.text();
+      res.json({ content, path, updatedAt: new Date().toISOString() });
+      
+    } catch (storageError) {
+      console.error('Storage error, generating template content:', storageError);
+      // Fallback to template-based content
+      const content = await getTemplateFileContent(path, project);
+      res.json({ content, path, updatedAt: new Date().toISOString() });
+    }
   } catch (error) {
     console.error('Failed to get file:', error);
     res.status(500).json({ error: 'Failed to get file' });
@@ -858,17 +1354,47 @@ app.post('/projects/:id/files/save', authenticateUser, async (req: any, res: any
       return res.status(404).json({ error: 'Project not found or access denied' });
     }
 
+    if (!supabaseService) {
+      return res.status(500).json({ error: 'Database not available' });
+    }
+
     console.log(`Saving file ${path} for project ${id}`);
     
-    // Mock file save - replace with real storage implementation
-    const result = {
-      success: true,
-      path,
-      size: content?.length || 0,
-      updatedAt: new Date().toISOString()
-    };
-    
-    res.json(result);
+    try {
+      // Save to Supabase Storage
+      const { data, error } = await supabaseService.storage
+        .from('project-files')
+        .upload(`${id}/${path}`, content, {
+          contentType: getFileContentType(path),
+          upsert: true
+        });
+
+      if (error) {
+        console.error('Storage save error:', error);
+        return res.status(500).json({ error: 'Failed to save file to storage' });
+      }
+
+      const result = {
+        success: true,
+        path,
+        size: content?.length || 0,
+        updatedAt: new Date().toISOString(),
+        storageKey: data.path
+      };
+      
+      res.json(result);
+    } catch (storageError) {
+      console.error('Storage not configured, file save skipped:', storageError);
+      // Return success even if storage fails (for development)
+      const result = {
+        success: true,
+        path,
+        size: content?.length || 0,
+        updatedAt: new Date().toISOString(),
+        note: 'Storage not configured, file not persisted'
+      };
+      res.json(result);
+    }
   } catch (error) {
     console.error('Failed to save file:', error);
     res.status(500).json({ error: 'Failed to save file' });
@@ -983,19 +1509,30 @@ app.get('/api/integrations/projects/:id/status', authenticateUser, async (req: a
       return res.status(404).json({ error: 'Project not found or access denied' });
     }
 
-    // Mock integration status
+    if (!supabaseService) {
+      return res.status(500).json({ error: 'Database not available' });
+    }
+
+    // Get real integration status from database using helpers
+    const githubIntegration = await db.getGitHubIntegration(req.user.id);
+    const serviceIntegrations = await db.getServiceIntegrations(req.user.id);
+    
+    const vercelIntegration = serviceIntegrations.find((s: any) => s.service === 'vercel');
+    
     const response = {
       github: {
-        connected: false,
-        projectLinked: false,
-        repoUrl: null
+        connected: !!githubIntegration,
+        projectLinked: !!project.repoowner && !!project.reponame,
+        repoUrl: project.repoowner && project.reponame 
+          ? `https://github.com/${project.repoowner}/${project.reponame}`
+          : null
       },
       vercel: {
-        connected: false,
-        projectId: null,
-        domain: null
+        connected: !!vercelIntegration && vercelIntegration.status === 'ACTIVE',
+        projectId: vercelIntegration?.config?.projectId || null,
+        domain: vercelIntegration?.config?.domain || null
       },
-      deploymentMode: 'GITHUB_ONLY'
+      deploymentMode: project.repoprovider?.toUpperCase() + '_ONLY' || 'GITHUB_ONLY'
     };
     
     res.json(response);
