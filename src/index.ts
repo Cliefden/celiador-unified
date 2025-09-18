@@ -413,6 +413,46 @@ app.delete('/projects/:id', authenticateUser, async (req: any, res: any) => {
 });
 
 // Job endpoints
+app.get('/projects/:id/jobs', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const { type, status } = req.query;
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    if (!supabaseService) {
+      return res.json([]);
+    }
+
+    let query = supabaseService
+      .from('jobs')
+      .select('*')
+      .eq('projectid', id)
+      .order('createdat', { ascending: false });
+    
+    if (type) {
+      query = query.eq('type', type);
+    }
+    
+    if (status) {
+      const statusArray = status.toString().split(',');
+      query = query.in('status', statusArray);
+    }
+
+    const { data: jobs, error } = await query;
+    
+    if (error) throw error;
+    
+    res.json(jobs || []);
+  } catch (error) {
+    console.error('Failed to get jobs:', error);
+    res.status(500).json({ error: 'Failed to get jobs' });
+  }
+});
+
 app.post('/projects/:id/jobs', authenticateUser, async (req: any, res: any) => {
   try {
     const { id } = req.params;
@@ -457,6 +497,159 @@ app.post('/projects/:id/jobs', authenticateUser, async (req: any, res: any) => {
   } catch (error) {
     console.error('Failed to create job:', error);
     res.status(500).json({ error: 'Failed to create job' });
+  }
+});
+
+app.post('/jobs/:id/cancel', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    
+    // Remove from queue if pending
+    const queueIndex = jobQueue.findIndex(job => job.id === id);
+    if (queueIndex >= 0) {
+      jobQueue.splice(queueIndex, 1);
+      console.log(`Job ${id} removed from queue`);
+    }
+    
+    // Update status in database
+    await db.updateJobStatus(id, 'CANCELLED');
+    
+    res.json({ success: true, message: 'Job cancelled' });
+  } catch (error) {
+    console.error('Failed to cancel job:', error);
+    res.status(500).json({ error: 'Failed to cancel job' });
+  }
+});
+
+app.post('/jobs/:id/retry', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    
+    if (!supabaseService) {
+      return res.status(500).json({ error: 'Database not available' });
+    }
+    
+    // Get job details
+    const { data: job, error } = await supabaseService
+      .from('jobs')
+      .select('*')
+      .eq('id', id)
+      .single();
+    
+    if (error || !job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+    
+    // Reset status and add back to queue
+    await db.updateJobStatus(id, 'PENDING');
+    
+    const jobData = {
+      id: job.id,
+      projectId: job.projectid,
+      userId: job.userid,
+      type: job.type,
+      prompt: job.prompt
+    };
+    
+    jobQueue.push(jobData);
+    console.log(`Job ${id} retried and added to queue`);
+    
+    res.json({ success: true, message: 'Job retried' });
+  } catch (error) {
+    console.error('Failed to retry job:', error);
+    res.status(500).json({ error: 'Failed to retry job' });
+  }
+});
+
+// Templates endpoint
+app.get('/templates', async (req: any, res: any) => {
+  try {
+    const templates = [
+      {
+        key: 'blank-nextjs',
+        name: 'Blank Next.js',
+        description: 'A minimal Next.js starter template',
+        category: 'web',
+        tech: ['Next.js', 'React', 'TypeScript'],
+        preview: 'https://via.placeholder.com/400x300?text=Next.js',
+        popular: true
+      },
+      {
+        key: 'next-prisma-supabase',
+        name: 'Next.js + Prisma + Supabase',
+        description: 'Full-stack Next.js with Prisma ORM and Supabase',
+        category: 'fullstack',
+        tech: ['Next.js', 'Prisma', 'Supabase', 'TypeScript'],
+        preview: 'https://via.placeholder.com/400x300?text=Fullstack',
+        popular: true
+      },
+      {
+        key: 'react-vite',
+        name: 'React + Vite',
+        description: 'Fast React development with Vite',
+        category: 'web',
+        tech: ['React', 'Vite', 'TypeScript'],
+        preview: 'https://via.placeholder.com/400x300?text=React+Vite'
+      },
+      {
+        key: 'express-api',
+        name: 'Express API',
+        description: 'RESTful API with Express.js',
+        category: 'backend',
+        tech: ['Express.js', 'Node.js', 'TypeScript'],
+        preview: 'https://via.placeholder.com/400x300?text=Express+API'
+      }
+    ];
+    
+    res.json(templates);
+  } catch (error) {
+    console.error('Failed to get templates:', error);
+    res.status(500).json({ error: 'Failed to get templates' });
+  }
+});
+
+// Activity stream endpoint
+app.get('/projects/:id/activity', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const { showAll } = req.query;
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    // Mock activity data - replace with real activity tracking
+    const activities = [
+      {
+        id: '1',
+        type: 'project_created',
+        message: 'Project created',
+        timestamp: project.createdat,
+        user: req.user.email || 'Unknown user'
+      },
+      {
+        id: '2',
+        type: 'job_completed',
+        message: 'Scaffold job completed',
+        timestamp: new Date(Date.now() - 3600000).toISOString(),
+        user: req.user.email || 'Unknown user'
+      },
+      {
+        id: '3',
+        type: 'file_modified',
+        message: 'Modified src/app/page.tsx',
+        timestamp: new Date(Date.now() - 1800000).toISOString(),
+        user: req.user.email || 'Unknown user'
+      }
+    ];
+    
+    const filteredActivities = showAll === 'true' ? activities : activities.slice(0, 5);
+    
+    res.json(filteredActivities);
+  } catch (error) {
+    console.error('Failed to get activity:', error);
+    res.status(500).json({ error: 'Failed to get activity' });
   }
 });
 
@@ -589,7 +782,167 @@ app.get('/projects/:id/preview/list', authenticateUser, async (req: any, res: an
   }
 });
 
-// File upload endpoint
+// File management endpoints
+app.get('/projects/:id/files/tree', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    // Mock file tree - replace with real storage implementation
+    const fileTree = [
+      {
+        name: 'src',
+        type: 'folder',
+        path: 'src',
+        children: [
+          { name: 'app', type: 'folder', path: 'src/app', children: [
+            { name: 'page.tsx', type: 'file', path: 'src/app/page.tsx', size: 1024 },
+            { name: 'layout.tsx', type: 'file', path: 'src/app/layout.tsx', size: 2048 }
+          ]},
+          { name: 'components', type: 'folder', path: 'src/components', children: [] }
+        ]
+      },
+      { name: 'package.json', type: 'file', path: 'package.json', size: 512 },
+      { name: 'README.md', type: 'file', path: 'README.md', size: 256 }
+    ];
+    
+    res.json(fileTree);
+  } catch (error) {
+    console.error('Failed to get file tree:', error);
+    res.status(500).json({ error: 'Failed to get file tree' });
+  }
+});
+
+app.get('/projects/:id/files/:path(*)', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id, path } = req.params;
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    // Mock file content - replace with real storage implementation
+    let content = '';
+    if (path === 'package.json') {
+      content = JSON.stringify({
+        name: project.name,
+        version: '1.0.0',
+        scripts: { dev: 'next dev', build: 'next build' },
+        dependencies: { next: '^14.0.0', react: '^18.0.0' }
+      }, null, 2);
+    } else if (path.endsWith('.tsx') || path.endsWith('.ts')) {
+      content = `// ${path}\nexport default function Component() {\n  return <div>Hello from ${path}</div>;\n}`;
+    } else {
+      content = `# ${path}\n\nThis is a mock file content for ${path}`;
+    }
+    
+    res.json({ content, path, updatedAt: new Date().toISOString() });
+  } catch (error) {
+    console.error('Failed to get file:', error);
+    res.status(500).json({ error: 'Failed to get file' });
+  }
+});
+
+app.post('/projects/:id/files/save', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const { path, content } = req.body;
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    console.log(`Saving file ${path} for project ${id}`);
+    
+    // Mock file save - replace with real storage implementation
+    const result = {
+      success: true,
+      path,
+      size: content?.length || 0,
+      updatedAt: new Date().toISOString()
+    };
+    
+    res.json(result);
+  } catch (error) {
+    console.error('Failed to save file:', error);
+    res.status(500).json({ error: 'Failed to save file' });
+  }
+});
+
+app.post('/projects/:id/files/create', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const { name, type, path, content } = req.body;
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    console.log(`Creating ${type} '${name}' in project ${id}`);
+    
+    const fullPath = path ? `${path}/${name}` : name;
+    
+    // Mock file/folder creation
+    const result = {
+      success: true,
+      name,
+      type,
+      path: fullPath,
+      content: content || '',
+      createdAt: new Date().toISOString()
+    };
+    
+    res.json(result);
+  } catch (error) {
+    console.error('Failed to create file/folder:', error);
+    res.status(500).json({ error: 'Failed to create file/folder' });
+  }
+});
+
+app.delete('/projects/:id/files/:path(*)', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id, path } = req.params;
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    console.log(`Deleting file ${path} from project ${id}`);
+    
+    res.json({ success: true, message: `File ${path} deleted` });
+  } catch (error) {
+    console.error('Failed to delete file:', error);
+    res.status(500).json({ error: 'Failed to delete file' });
+  }
+});
+
+app.post('/projects/:id/files/delete-folder', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const { path } = req.body;
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    console.log(`Deleting folder ${path} from project ${id}`);
+    
+    res.json({ success: true, message: `Folder ${path} deleted` });
+  } catch (error) {
+    console.error('Failed to delete folder:', error);
+    res.status(500).json({ error: 'Failed to delete folder' });
+  }
+});
+
 app.post('/projects/:id/files/upload', authenticateUser, async (req: any, res: any) => {
   try {
     const { id } = req.params;
@@ -617,6 +970,170 @@ app.post('/projects/:id/files/upload', authenticateUser, async (req: any, res: a
   } catch (error) {
     console.error('Failed to upload file:', error);
     res.status(500).json({ error: 'Failed to upload file' });
+  }
+});
+
+// Integration endpoints
+app.get('/api/integrations/projects/:id/status', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    // Mock integration status
+    const response = {
+      github: {
+        connected: false,
+        projectLinked: false,
+        repoUrl: null
+      },
+      vercel: {
+        connected: false,
+        projectId: null,
+        domain: null
+      },
+      deploymentMode: 'GITHUB_ONLY'
+    };
+    
+    res.json(response);
+  } catch (error) {
+    console.error('Failed to get integration status:', error);
+    res.status(500).json({ error: 'Failed to get integration status' });
+  }
+});
+
+app.get('/api/integrations/projects/:id/deployment-options', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    // Mock deployment options
+    const mockStrategy = {
+      type: 'GITHUB_ONLY',
+      target: 'main',
+      options: ['github']
+    };
+    
+    res.json(mockStrategy);
+  } catch (error) {
+    console.error('Failed to get deployment options:', error);
+    res.status(500).json({ error: 'Failed to get deployment options' });
+  }
+});
+
+app.post('/api/integrations/projects/:id/deploy', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const { type, commitMessage, branch } = req.body;
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    console.log(`Deploying project ${id} with type: ${type}`);
+    
+    // Mock deployment result
+    const result = {
+      success: true,
+      deploymentId: `dep_${Date.now()}`,
+      urls: {
+        github: `https://github.com/user/${project.reponame}/commit/abc123`
+      },
+      branch: branch || 'main',
+      commitSha: 'abc123'
+    };
+    
+    res.json(result);
+  } catch (error) {
+    console.error('Failed to deploy:', error);
+    res.status(500).json({ error: 'Deployment failed' });
+  }
+});
+
+app.get('/api/integrations/vercel/teams', authenticateUser, async (req: any, res: any) => {
+  try {
+    // Mock Vercel teams
+    const teams = [
+      {
+        id: 'team_123',
+        slug: 'my-team',
+        name: 'My Team'
+      }
+    ];
+    
+    res.json(teams);
+  } catch (error) {
+    console.error('Failed to get Vercel teams:', error);
+    res.status(500).json({ error: 'Failed to get Vercel teams' });
+  }
+});
+
+app.get('/api/integrations/vercel/projects', authenticateUser, async (req: any, res: any) => {
+  try {
+    // Mock Vercel projects
+    const projects = [
+      {
+        id: 'proj_123',
+        name: 'my-project',
+        framework: 'nextjs',
+        targets: {
+          production: {
+            domain: 'my-project.vercel.app'
+          }
+        }
+      }
+    ];
+    
+    res.json(projects);
+  } catch (error) {
+    console.error('Failed to get Vercel projects:', error);
+    res.status(500).json({ error: 'Failed to get Vercel projects' });
+  }
+});
+
+app.post('/api/integrations/projects/:id/vercel', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const { vercelProjectId, vercelTeamId, accessToken, domain } = req.body;
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    console.log(`Connecting project ${id} to Vercel project ${vercelProjectId}`);
+    
+    // Mock Vercel connection
+    res.json({ success: true, message: 'Project connected to Vercel' });
+  } catch (error) {
+    console.error('Failed to connect to Vercel:', error);
+    res.status(500).json({ error: 'Failed to connect to Vercel' });
+  }
+});
+
+app.delete('/api/integrations/projects/:id/vercel', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    console.log(`Disconnecting Vercel integration for project ${id}`);
+    
+    res.json({ success: true, message: 'Vercel integration disconnected' });
+  } catch (error) {
+    console.error('Failed to disconnect Vercel:', error);
+    res.status(500).json({ error: 'Failed to disconnect Vercel integration' });
   }
 });
 
