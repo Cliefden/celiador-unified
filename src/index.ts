@@ -97,6 +97,54 @@ const db = {
     return data;
   },
   
+  getUserSettings: async (userId: string) => {
+    if (!supabaseService) return null;
+    
+    const { data, error } = await supabaseService
+      .from('user_settings')
+      .select('*')
+      .eq('user_id', userId)
+      .is('deleted_at', null)
+      .single();
+    
+    if (error && error.code !== 'PGRST116') throw error; // PGRST116 = no rows returned
+    return data;
+  },
+  
+  createUserSettings: async (userId: string) => {
+    if (!supabaseService) throw new Error('Database not available');
+    
+    const { data, error } = await supabaseService
+      .from('user_settings')
+      .insert({
+        user_id: userId,
+        creator: userId
+      })
+      .select()
+      .single();
+    
+    if (error) throw error;
+    return data;
+  },
+  
+  updateUserSettings: async (userId: string, updates: any) => {
+    if (!supabaseService) throw new Error('Database not available');
+    
+    const { data, error } = await supabaseService
+      .from('user_settings')
+      .update({
+        ...updates,
+        updater: userId
+      })
+      .eq('user_id', userId)
+      .is('deleted_at', null)
+      .select()
+      .single();
+    
+    if (error) throw error;
+    return data;
+  },
+  
   createJob: async (jobData: any) => {
     if (!supabaseService) throw new Error('Database not available');
     
@@ -383,7 +431,9 @@ async function buildFileTreeFromStorage(files: any[], projectId: string) {
   const folderMap = new Map();
   
   files.forEach(file => {
-    const parts = file.name.split('/');
+    // Use fullPath from recursive traversal, or fall back to name
+    const filePath = file.fullPath || file.name;
+    const parts = filePath.split('/');
     let currentLevel = tree;
     let currentPath = '';
     
@@ -391,21 +441,37 @@ async function buildFileTreeFromStorage(files: any[], projectId: string) {
       currentPath += (currentPath ? '/' : '') + part;
       
       if (index === parts.length - 1) {
-        // It's a file
-        currentLevel.push({
-          name: part,
-          type: 'file',
-          path: currentPath,
-          size: file.metadata?.size || 0,
-          updatedAt: file.updated_at
-        });
+        // Check if this is actually a file (has metadata/id) or empty folder
+        const isFile = file.id || file.metadata;
+        if (isFile) {
+          // It's a file
+          currentLevel.push({
+            name: part,
+            type: 'file',
+            path: currentPath,
+            size: file.metadata?.size || 0,
+            updatedAt: file.updated_at
+          });
+        } else {
+          // It's an empty folder - only add if not already exists
+          let folder = currentLevel.find(item => item.name === part && item.type === 'directory');
+          if (!folder) {
+            folder = {
+              name: part,
+              type: 'directory',
+              path: currentPath,
+              children: []
+            };
+            currentLevel.push(folder);
+          }
+        }
       } else {
-        // It's a folder
-        let folder = currentLevel.find(item => item.name === part && item.type === 'folder');
+        // It's a folder in the path
+        let folder = currentLevel.find(item => item.name === part && item.type === 'directory');
         if (!folder) {
           folder = {
             name: part,
-            type: 'folder',
+            type: 'directory',
             path: currentPath,
             children: []
           };
@@ -563,6 +629,577 @@ function getFileContentType(path: string): string {
   return types[ext || ''] || 'text/plain';
 }
 
+// Preview functionality classes
+interface SyncResult {
+  success: boolean;
+  filesDownloaded: number;
+  errors: string[];
+  localPath: string;
+}
+
+interface PreviewInstance {
+  id: string;
+  projectId: string;
+  userId: string;
+  port: number;
+  url: string;
+  status: 'syncing' | 'starting' | 'running' | 'error' | 'stopped';
+  process?: any;
+  localPath?: string;
+  syncResult?: SyncResult;
+  startTime: Date;
+  lastAccessed: Date;
+  errorMessage?: string;
+}
+
+class PortManager {
+  private usedPorts = new Set<number>();
+  private readonly startPort = 3100;
+  private readonly endPort = 3200;
+
+  async allocatePort(): Promise<number> {
+    for (let port = this.startPort; port <= this.endPort; port++) {
+      if (!this.usedPorts.has(port)) {
+        // Check if port is actually available
+        const isAvailable = await this.isPortAvailable(port);
+        if (isAvailable) {
+          this.usedPorts.add(port);
+          return port;
+        }
+      }
+    }
+    throw new Error('No available ports');
+  }
+
+  releasePort(port: number): void {
+    this.usedPorts.delete(port);
+  }
+
+  private async isPortAvailable(port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const net = require('net');
+      const server = net.createServer();
+      
+      server.listen(port, () => {
+        server.once('close', () => resolve(true));
+        server.close();
+      });
+      
+      server.on('error', () => resolve(false));
+    });
+  }
+}
+
+class PreviewManager {
+  private instances = new Map<string, PreviewInstance>();
+  private portManager = new PortManager();
+  private readonly basePreviewDir = '/tmp/celiador-previews';
+
+  async startPreview(projectId: string, userId: string, name: string, type: string = 'nextjs'): Promise<PreviewInstance> {
+    const instanceId = `${projectId}-${Date.now()}`;
+    const port = await this.portManager.allocatePort();
+    
+    const instance: PreviewInstance = {
+      id: instanceId,
+      projectId,
+      userId,
+      port,
+      url: `http://localhost:${port}`,
+      status: 'syncing',
+      startTime: new Date(),
+      lastAccessed: new Date()
+    };
+
+    this.instances.set(instanceId, instance);
+
+    try {
+      console.log(`[PreviewManager] Starting preview for ${name} on port ${port}`);
+      
+      // Create local directory for project
+      const localPath = `${this.basePreviewDir}/${userId}-${projectId}`;
+      instance.localPath = localPath;
+      
+      // Update status to starting
+      instance.status = 'starting';
+      
+      // Sync files from Supabase Storage
+      const syncResult = await this.syncProjectFiles(projectId, localPath);
+      instance.syncResult = syncResult;
+      
+      if (!syncResult.success) {
+        instance.status = 'error';
+        instance.errorMessage = `File sync failed: ${syncResult.errors.join(', ')}`;
+        this.portManager.releasePort(port);
+        throw new Error(instance.errorMessage);
+      }
+      
+      if (syncResult.filesDownloaded === 0) {
+        console.log(`[PreviewManager] No project files found, but continuing with basic structure`);
+      }
+      
+      // Start development server
+      await this.startDevServer(instance, type);
+      
+      instance.status = 'running';
+      console.log(`[PreviewManager] Preview ${instanceId} running at ${instance.url}`);
+      
+    } catch (error) {
+      console.error(`[PreviewManager] Failed to start preview ${instanceId}:`, error);
+      instance.status = 'error';
+      instance.errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      this.portManager.releasePort(port);
+    }
+
+    return instance;
+  }
+
+  async stopPreview(instanceId: string): Promise<void> {
+    const instance = this.instances.get(instanceId);
+    if (!instance) {
+      throw new Error('Preview instance not found');
+    }
+
+    console.log(`[PreviewManager] Stopping preview ${instanceId}`);
+    
+    // Kill the process if it exists
+    if (instance.process) {
+      instance.process.kill('SIGTERM');
+    }
+    
+    // Release the port
+    this.portManager.releasePort(instance.port);
+    
+    // Update status
+    instance.status = 'stopped';
+    
+    // Remove from instances
+    this.instances.delete(instanceId);
+  }
+
+  getPreview(instanceId: string): PreviewInstance | undefined {
+    const instance = this.instances.get(instanceId);
+    if (instance) {
+      instance.lastAccessed = new Date();
+    }
+    return instance;
+  }
+
+  getPreviewsForProject(projectId: string): PreviewInstance[] {
+    return Array.from(this.instances.values()).filter(
+      instance => instance.projectId === projectId
+    );
+  }
+
+  getAllPreviews(): PreviewInstance[] {
+    return Array.from(this.instances.values());
+  }
+
+  private async syncProjectFiles(projectId: string, localPath: string): Promise<SyncResult> {
+    const fs = require('fs').promises;
+    const path = require('path');
+    const errors: string[] = [];
+    let filesDownloaded = 0;
+    
+    try {
+      // Ensure directory exists
+      await fs.mkdir(localPath, { recursive: true });
+      
+      if (!supabaseService) {
+        console.log(`[PreviewManager] No Supabase service available, creating basic structure`);
+        await this.createBasicNextjsStructure(localPath, projectId);
+        return {
+          success: true,
+          filesDownloaded: 1, // Basic structure created
+          errors: [],
+          localPath
+        };
+      }
+
+      // Get project details to get userId
+      const project = await db.getProjectById(projectId);
+      if (!project) {
+        console.log(`[PreviewManager] Project not found: ${projectId}, creating basic structure`);
+        await this.createBasicNextjsStructure(localPath, projectId);
+        return {
+          success: true,
+          filesDownloaded: 1, // Basic structure created
+          errors: [],
+          localPath
+        };
+      }
+
+      console.log(`[PreviewManager] Downloading files for project ${projectId}, user ${project.userid}`);
+
+      // Get all files recursively from Supabase Storage using correct path pattern
+      const basePath = `${project.userid}/${projectId}`;
+      const allFiles = await this.getAllFilesRecursively(basePath);
+      
+      console.log(`[PreviewManager] Found ${allFiles.length} files to download`);
+
+      if (allFiles.length === 0) {
+        console.log(`[PreviewManager] No files found in storage for ${basePath}, creating basic structure`);
+        await this.createBasicNextjsStructure(localPath, projectId);
+        return {
+          success: true,
+          filesDownloaded: 1, // Basic structure created
+          errors: [],
+          localPath
+        };
+      }
+      
+      // Download and save each file
+      for (const file of allFiles) {
+        // Skip directories (items without id/metadata are directories)
+        if (!file.id && !file.metadata) {
+          console.log(`[PreviewManager] Skipping directory: ${file.fullPath || file.name}`);
+          continue;
+        }
+        
+        if (file.fullPath || file.name) {
+          const filePath = file.fullPath || file.name;
+          try {
+            const { data: fileData, error: downloadError } = await supabaseService.storage
+              .from('project-files')
+              .download(`${basePath}/${filePath}`);
+
+            if (!downloadError && fileData) {
+              const localFilePath = path.join(localPath, filePath);
+              const dir = path.dirname(localFilePath);
+              
+              // Ensure directory exists
+              await fs.mkdir(dir, { recursive: true });
+              
+              // Write file
+              const content = await fileData.text();
+              await fs.writeFile(localFilePath, content);
+              filesDownloaded++;
+              console.log(`[PreviewManager] Downloaded: ${filePath} (${content.length} chars)`);
+            } else {
+              const errorMsg = `Failed to download ${filePath}: ${downloadError?.message || 'Unknown error'}`;
+              console.warn(`[PreviewManager] ${errorMsg}`);
+              errors.push(errorMsg);
+            }
+          } catch (fileError) {
+            const errorMsg = `Failed to download ${filePath}: ${fileError instanceof Error ? fileError.message : 'Unknown error'}`;
+            console.warn(`[PreviewManager] ${errorMsg}`);
+            errors.push(errorMsg);
+          }
+        }
+      }
+
+      console.log(`[PreviewManager] Successfully downloaded ${filesDownloaded} files to ${localPath}`);
+      
+      if (filesDownloaded === 0) {
+        console.log(`[PreviewManager] No files were downloaded, creating basic structure`);
+        await this.createBasicNextjsStructure(localPath, projectId);
+        filesDownloaded = 1; // Basic structure created
+      }
+
+      return {
+        success: errors.length === 0,
+        filesDownloaded,
+        errors,
+        localPath
+      };
+      
+    } catch (error) {
+      const errorMsg = `File sync failed: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      console.error(`[PreviewManager] ${errorMsg}`);
+      errors.push(errorMsg);
+
+      return {
+        success: false,
+        filesDownloaded,
+        errors,
+        localPath
+      };
+    }
+  }
+
+  /**
+   * Get all files recursively from a path in Supabase Storage
+   */
+  private async getAllFilesRecursively(basePath: string, currentPath = ''): Promise<any[]> {
+    const fullPath = currentPath ? `${basePath}/${currentPath}` : basePath;
+    
+    try {
+      const { data, error } = await supabaseService!.storage
+        .from('project-files')
+        .list(fullPath, {
+          limit: 1000,
+          offset: 0
+        });
+        
+      if (error) {
+        console.error(`[PreviewManager] Failed to list files at ${fullPath}:`, error);
+        return [];
+      }
+      
+      let allFiles: any[] = [];
+      
+      for (const item of data || []) {
+        if (!item.name) continue;
+        
+        const itemPath = currentPath ? `${currentPath}/${item.name}` : item.name;
+        
+        // Add the current item with its path
+        allFiles.push({
+          ...item,
+          fullPath: itemPath
+        });
+        
+        // If this is a directory (no metadata means it's a folder), recursively get its contents
+        if (!item.id && !item.metadata) {
+          const childFiles = await this.getAllFilesRecursively(basePath, itemPath);
+          allFiles.push(...childFiles);
+        }
+      }
+      
+      return allFiles;
+    } catch (error) {
+      console.error(`[PreviewManager] Error in getAllFilesRecursively:`, error);
+      return [];
+    }
+  }
+
+  private async createBasicNextjsStructure(localPath: string, projectId: string): Promise<void> {
+    const fs = require('fs').promises;
+    const path = require('path');
+
+    // Create package.json
+    const packageJson = {
+      name: `project-${projectId}`,
+      version: '0.1.0',
+      private: true,
+      scripts: {
+        dev: 'next dev',
+        build: 'next build',
+        start: 'next start'
+      },
+      dependencies: {
+        next: '^14.0.0',
+        react: '^18.0.0',
+        'react-dom': '^18.0.0'
+      }
+    };
+
+    await fs.writeFile(
+      path.join(localPath, 'package.json'),
+      JSON.stringify(packageJson, null, 2)
+    );
+
+    // Create src/app structure
+    await fs.mkdir(path.join(localPath, 'src', 'app'), { recursive: true });
+
+    // Create layout.tsx
+    const layoutContent = `export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  );
+}`;
+
+    await fs.writeFile(path.join(localPath, 'src', 'app', 'layout.tsx'), layoutContent);
+
+    // Create page.tsx
+    const pageContent = `export default function Home() {
+  return (
+    <main style={{ padding: '2rem', textAlign: 'center' }}>
+      <h1>Project Preview</h1>
+      <p>Your project is running in preview mode!</p>
+    </main>
+  );
+}`;
+
+    await fs.writeFile(path.join(localPath, 'src', 'app', 'page.tsx'), pageContent);
+
+    // Create next.config.js
+    const nextConfig = `/** @type {import('next').NextConfig} */
+const nextConfig = {
+  reactStrictMode: true,
+}
+
+module.exports = nextConfig`;
+
+    await fs.writeFile(path.join(localPath, 'next.config.js'), nextConfig);
+  }
+
+  private async startDevServer(instance: PreviewInstance, type: string): Promise<void> {
+    const { spawn } = require('child_process');
+    const path = require('path');
+    const fs = require('fs').promises;
+
+    if (!instance.localPath) {
+      throw new Error('Local path not set');
+    }
+
+    // Detect package manager and install dependencies
+    console.log(`[PreviewManager] Installing dependencies for ${instance.id}`);
+    
+    const packageManager = await this.detectPackageManager(instance.localPath);
+    console.log(`[PreviewManager] Detected package manager: ${packageManager}`);
+    
+    // Clean up conflicting lock files if necessary
+    await this.cleanupLockFiles(instance.localPath, packageManager);
+    
+    const installCmd = packageManager === 'pnpm' ? 'pnpm' : 'npm';
+    const installArgs = packageManager === 'pnpm' ? ['install'] : ['install'];
+    
+    const installProcess = spawn(installCmd, installArgs, {
+      cwd: instance.localPath,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    await new Promise((resolve, reject) => {
+      installProcess.on('close', (code: number) => {
+        if (code === 0) {
+          resolve(void 0);
+        } else {
+          reject(new Error(`npm install failed with code ${code}`));
+        }
+      });
+    });
+
+    // Start dev server
+    console.log(`[PreviewManager] Starting dev server for ${instance.id} on port ${instance.port} using ${packageManager}`);
+    
+    const devCmd = packageManager === 'pnpm' ? 'pnpm' : (packageManager === 'yarn' ? 'yarn' : 'npm');
+    const devArgs = packageManager === 'yarn' ? ['dev'] : ['run', 'dev'];
+    
+    const devProcess = spawn(devCmd, devArgs, {
+      cwd: instance.localPath,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        PORT: instance.port.toString()
+      }
+    });
+
+    instance.process = devProcess;
+
+    // Wait for server to be ready
+    return new Promise((resolve, reject) => {
+      let output = '';
+      
+      const timeout = setTimeout(() => {
+        reject(new Error('Server startup timeout'));
+      }, 60000); // 60 second timeout
+
+      devProcess.stdout.on('data', (data: any) => {
+        output += data.toString();
+        console.log(`[Preview ${instance.id}]:`, data.toString().trim());
+        
+        // Check if server is ready
+        if (output.includes('Ready') || output.includes('ready') || output.includes(`localhost:${instance.port}`)) {
+          clearTimeout(timeout);
+          resolve(void 0);
+        }
+      });
+
+      devProcess.stderr.on('data', (data: any) => {
+        console.error(`[Preview ${instance.id} ERROR]:`, data.toString().trim());
+      });
+
+      devProcess.on('close', (code: number) => {
+        clearTimeout(timeout);
+        if (code !== 0) {
+          reject(new Error(`Dev server exited with code ${code}`));
+        }
+      });
+    });
+  }
+
+  /**
+   * Detect which package manager to use based on lock files
+   */
+  private async detectPackageManager(projectPath: string): Promise<'npm' | 'pnpm' | 'yarn'> {
+    const fs = require('fs').promises;
+    const path = require('path');
+    
+    try {
+      // Check for pnpm-lock.yaml first
+      await fs.access(path.join(projectPath, 'pnpm-lock.yaml'));
+      return 'pnpm';
+    } catch {}
+    
+    try {
+      // Check for yarn.lock
+      await fs.access(path.join(projectPath, 'yarn.lock'));
+      return 'yarn';
+    } catch {}
+    
+    // Default to npm
+    return 'npm';
+  }
+
+  /**
+   * Clean up conflicting lock files
+   */
+  private async cleanupLockFiles(projectPath: string, packageManager: 'npm' | 'pnpm' | 'yarn'): Promise<void> {
+    const fs = require('fs').promises;
+    const path = require('path');
+    
+    try {
+      if (packageManager === 'pnpm') {
+        // Remove npm and yarn lock files if using pnpm
+        try {
+          await fs.unlink(path.join(projectPath, 'package-lock.json'));
+          console.log(`[PreviewManager] Removed conflicting package-lock.json`);
+        } catch {}
+        try {
+          await fs.unlink(path.join(projectPath, 'yarn.lock'));
+          console.log(`[PreviewManager] Removed conflicting yarn.lock`);
+        } catch {}
+        // Also remove node_modules to start fresh
+        try {
+          await fs.rm(path.join(projectPath, 'node_modules'), { recursive: true, force: true });
+          console.log(`[PreviewManager] Removed existing node_modules`);
+        } catch {}
+      } else if (packageManager === 'yarn') {
+        // Remove npm and pnpm lock files if using yarn
+        try {
+          await fs.unlink(path.join(projectPath, 'package-lock.json'));
+          console.log(`[PreviewManager] Removed conflicting package-lock.json`);
+        } catch {}
+        try {
+          await fs.unlink(path.join(projectPath, 'pnpm-lock.yaml'));
+          console.log(`[PreviewManager] Removed conflicting pnpm-lock.yaml`);
+        } catch {}
+        // Also remove node_modules to start fresh
+        try {
+          await fs.rm(path.join(projectPath, 'node_modules'), { recursive: true, force: true });
+          console.log(`[PreviewManager] Removed existing node_modules`);
+        } catch {}
+      } else {
+        // Using npm - remove other lock files
+        try {
+          await fs.unlink(path.join(projectPath, 'pnpm-lock.yaml'));
+          console.log(`[PreviewManager] Removed conflicting pnpm-lock.yaml`);
+        } catch {}
+        try {
+          await fs.unlink(path.join(projectPath, 'yarn.lock'));
+          console.log(`[PreviewManager] Removed conflicting yarn.lock`);
+        } catch {}
+        // Also remove node_modules to start fresh
+        try {
+          await fs.rm(path.join(projectPath, 'node_modules'), { recursive: true, force: true });
+          console.log(`[PreviewManager] Removed existing node_modules`);
+        } catch {}
+      }
+    } catch (error) {
+      console.warn(`[PreviewManager] Error cleaning up lock files:`, error);
+    }
+  }
+}
+
+// Global preview manager instance
+const previewManager = new PreviewManager();
+
 // Authentication middleware
 const authenticateUser = async (req: any, res: any, next: any) => {
   try {
@@ -582,6 +1219,12 @@ const authenticateUser = async (req: any, res: any, next: any) => {
     }
 
     const token = authHeader.substring(7);
+    
+    // Debug: Log token info
+    if (req.path.includes('/activity')) {
+      console.log(`[DEBUG] Activity endpoint token length: ${token.length}, starts with: ${token.substring(0, 20)}...`);
+    }
+    
     const { data: { user }, error } = await supabase.auth.getUser(token);
     
     if (error || !user) {
@@ -1045,10 +1688,14 @@ app.get('/projects/:id/activity', authenticateUser, async (req: any, res: any) =
     const { id } = req.params;
     const { showAll } = req.query;
     
+    console.log(`[ACTIVITY] NEW REQUEST for project ${id}, showAll: ${showAll}, time: ${new Date().toISOString()}`);
+    
     const project = await db.getProjectById(id);
     if (!project || project.userid !== req.user.id) {
       return res.status(404).json({ error: 'Project not found or access denied' });
     }
+    
+    console.log('[DEBUG] Project createdat:', project.createdat);
 
     if (!supabaseService) {
       return res.json([]);
@@ -1057,11 +1704,12 @@ app.get('/projects/:id/activity', authenticateUser, async (req: any, res: any) =
     // Get comprehensive activity from multiple sources
     const limit = showAll === 'true' ? 50 : 10;
     
-    // Get jobs activity
+    // Get jobs activity - order by updatedat first, then createdat
     const { data: jobs, error: jobsError } = await supabaseService
       .from('jobs')
-      .select('id, type, status, createdat, updatedat, prompt')
+      .select('id, type, status, createdat, updatedat, prompt, output, error, metadata, userid')
       .eq('projectid', id)
+      .order('updatedat', { ascending: false, nullsLast: true })
       .order('createdat', { ascending: false })
       .limit(limit);
 
@@ -1069,6 +1717,12 @@ app.get('/projects/:id/activity', authenticateUser, async (req: any, res: any) =
       console.error('Error fetching jobs for activity:', jobsError);
       return res.status(500).json({ error: 'Failed to get activity' });
     }
+
+    console.log(`[DEBUG] Found ${jobs?.length || 0} jobs for project ${id}`);
+    console.log('[DEBUG] Jobs with timestamps:');
+    jobs?.forEach((job, i) => {
+      console.log(`  Job ${i}: ${job.type} - created: ${job.createdat}, updated: ${job.updatedat}`);
+    });
 
     // Get conversation activity if conversations exist
     let conversationActivities = [];
@@ -1084,44 +1738,90 @@ app.get('/projects/:id/activity', authenticateUser, async (req: any, res: any) =
       conversationActivities = conversations?.map((conv: any) => ({
         id: `conv_${conv.id}`,
         type: 'conversation',
-        message: `Conversation started: ${conv.title || 'Untitled'}`,
+        title: 'Conversation started',
+        description: conv.title || 'Untitled conversation',
         timestamp: conv.createdat,
-        user: req.user.email || 'Unknown user',
-        status: 'COMPLETED'
+        metadata: {
+          conversationId: conv.id
+        }
       })) || [];
     } catch (convError) {
       // Conversations table might not exist, ignore
       console.log('Conversations table not available, skipping conversation activity');
     }
 
-    // Convert jobs to activity format
+    // Convert jobs to activity format with rich data
     const jobActivities = jobs?.map((job: any) => ({
       id: job.id,
-      type: job.type.toLowerCase(),
-      message: job.status === 'COMPLETED' 
-        ? `${job.type} job completed: ${job.prompt || 'No description'}`
-        : `${job.type} job ${job.status.toLowerCase()}: ${job.prompt || 'No description'}`,
+      type: 'job',
+      title: getJobTitle(job.type, job.status),
+      description: job.prompt || 'No description available',
       timestamp: job.updatedat || job.createdat,
-      user: req.user.email || 'Unknown user',
-      status: job.status
+      status: job.status,
+      metadata: {
+        jobId: job.id,
+        jobType: job.type,
+        output: job.output,
+        error: job.error,
+        jobMetadata: job.metadata,
+        userId: job.userid
+      }
     })) || [];
 
-    // Combine all activities
-    const allActivities = [...jobActivities, ...conversationActivities];
+
+    // Helper function to get better job titles
+    function getJobTitle(type: string, status: string) {
+      const typeMap: { [key: string]: string } = {
+        'SCAFFOLD': 'Project Setup',
+        'AI_ACTION': 'AI Code Generation', 
+        'EDIT': 'Code Modification',
+        'TEST': 'Test Execution',
+        'DEPLOY': 'Deployment',
+        'BUILD': 'Build Process'
+      };
+      
+      const statusMap: { [key: string]: string } = {
+        'PENDING': 'queued',
+        'RUNNING': 'in progress',
+        'COMPLETED': 'completed',
+        'FAILED': 'failed',
+        'CANCELLED': 'cancelled'
+      };
+      
+      const jobType = typeMap[type] || type;
+      const jobStatus = statusMap[status] || status.toLowerCase();
+      
+      return `${jobType} ${jobStatus}`;
+    }
+
+    // Combine all activities including project creation
+    const allActivities = [
+      ...jobActivities, 
+      ...conversationActivities,
+      {
+        id: 'project_created',
+        type: 'system',
+        title: 'Project created',
+        description: `Project "${project.name}" was created`,
+        timestamp: project.createdat,
+        status: 'COMPLETED'
+      }
+    ];
     
-    // Sort by timestamp and add project creation
-    allActivities.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-    
-    allActivities.unshift({
-      id: 'project_created',
-      type: 'project_created',
-      message: `Project "${project.name}" created`,
-      timestamp: project.createdat,
-      user: req.user.email || 'Unknown user',
-      status: 'COMPLETED'
+    // Sort all activities by timestamp (newest first)
+    allActivities.sort((a, b) => {
+      const timeA = new Date(a.timestamp).getTime();
+      const timeB = new Date(b.timestamp).getTime();
+      return timeB - timeA; // newest first (larger timestamp first)
     });
     
-    res.json(allActivities.slice(0, limit));
+    const finalActivities = allActivities.slice(0, limit);
+    console.log(`[DEBUG] Returning ${finalActivities.length} activities for project ${id}`);
+    console.log('[DEBUG] Final activity order:');
+    finalActivities.forEach((activity, i) => {
+      console.log(`  ${i}: ${activity.title} - ${activity.timestamp}`);
+    });
+    res.json({ activities: finalActivities });
   } catch (error) {
     console.error('Failed to get activity:', error);
     res.status(500).json({ error: 'Failed to get activity' });
@@ -1155,22 +1855,32 @@ app.post('/projects/:id/preview/start', authenticateUser, async (req: any, res: 
       return res.status(404).json({ error: 'Project not found or access denied' });
     }
 
-    // Simulate preview creation
-    const previewId = `preview_${Date.now()}`;
-    const preview = {
-      id: previewId,
-      projectId: id,
-      name: name || 'Project Preview',
-      type: type || 'nextjs',
-      status: 'starting',
-      url: `https://preview-${previewId}.mock.com`,
-      createdAt: new Date().toISOString()
-    };
-
-    // In a real implementation, you'd start a preview container/service here
-    console.log(`Preview ${previewId} created for project ${id}`);
+    // Start real preview using PreviewManager
+    const preview = await previewManager.startPreview(
+      id,
+      req.user.id,
+      name || project.name || 'Project Preview',
+      type || 'nextjs'
+    );
     
-    res.status(201).json(preview);
+    res.status(201).json({
+      success: true,
+      preview: {
+        id: preview.id,
+        projectId: preview.projectId,
+        userId: preview.userId,
+        name: name || project.name || 'Project Preview',
+        type: type || 'nextjs',
+        status: preview.status,
+        url: preview.url,
+        port: preview.port,
+        localPath: preview.localPath,
+        syncResult: preview.syncResult,
+        startTime: preview.startTime.toISOString(),
+        lastAccessed: preview.lastAccessed.toISOString(),
+        errorMessage: preview.errorMessage
+      }
+    });
   } catch (error) {
     console.error('Failed to start preview:', error);
     res.status(500).json({ error: 'Failed to start preview' });
@@ -1188,7 +1898,8 @@ app.delete('/projects/:id/preview/:previewId', authenticateUser, async (req: any
       return res.status(404).json({ error: 'Project not found or access denied' });
     }
 
-    // In a real implementation, you'd stop the preview container/service here
+    // Stop real preview using PreviewManager
+    await previewManager.stopPreview(previewId);
     console.log(`Preview ${previewId} stopped for project ${id}`);
     
     res.json({ success: true, message: `Preview ${previewId} stopped` });
@@ -1209,17 +1920,29 @@ app.get('/projects/:id/preview/:previewId/status', authenticateUser, async (req:
       return res.status(404).json({ error: 'Project not found or access denied' });
     }
 
-    // Mock preview status
-    const status = {
-      id: previewId,
-      projectId: id,
-      status: 'running',
-      url: `https://preview-${previewId}.mock.com`,
-      logs: ['Preview service started', 'Application deployed', 'Ready to serve requests'],
-      updatedAt: new Date().toISOString()
-    };
+    // Get real preview status
+    const preview = previewManager.getPreview(previewId);
     
-    res.json(status);
+    if (!preview) {
+      return res.status(404).json({ error: 'Preview not found' });
+    }
+    
+    res.json({
+      success: true,
+      preview: {
+        id: preview.id,
+        projectId: preview.projectId,
+        userId: preview.userId,
+        status: preview.status,
+        url: preview.url,
+        port: preview.port,
+        localPath: preview.localPath,
+        syncResult: preview.syncResult,
+        startTime: preview.startTime.toISOString(),
+        lastAccessed: preview.lastAccessed.toISOString(),
+        errorMessage: preview.errorMessage
+      }
+    });
   } catch (error) {
     console.error('Failed to get preview status:', error);
     res.status(500).json({ error: 'Failed to get preview status' });
@@ -1237,65 +1960,120 @@ app.get('/projects/:id/preview/list', authenticateUser, async (req: any, res: an
       return res.status(404).json({ error: 'Project not found or access denied' });
     }
 
-    // Mock preview list - in real implementation, you'd query preview database/service
-    const previews = [
-      {
-        id: `preview_${Date.now() - 3600000}`,
-        projectId: id,
-        name: 'Main Preview',
-        type: 'nextjs',
-        status: 'running',
-        url: `https://preview-main.mock.com`,
-        createdAt: new Date(Date.now() - 3600000).toISOString()
-      }
-    ];
+    // Get real preview list for project
+    const previews = previewManager.getPreviewsForProject(id);
     
-    res.json(previews);
+    const previewList = previews.map(preview => ({
+      id: preview.id,
+      projectId: preview.projectId,
+      userId: preview.userId,
+      name: `Preview ${preview.id.split('-')[1]}`,
+      type: 'nextjs',
+      status: preview.status,
+      url: preview.url,
+      port: preview.port,
+      localPath: preview.localPath,
+      syncResult: preview.syncResult,
+      startTime: preview.startTime.toISOString(),
+      lastAccessed: preview.lastAccessed.toISOString(),
+      errorMessage: preview.errorMessage
+    }));
+    
+    res.json({
+      success: true,
+      previews: previewList
+    });
   } catch (error) {
     console.error('Failed to list previews:', error);
     res.status(500).json({ error: 'Failed to list previews' });
   }
 });
 
+// Recursive file listing helper function
+async function getAllFilesRecursively(supabaseService: any, basePath: string, currentPath = ''): Promise<any[]> {
+  const fullPath = currentPath ? `${basePath}/${currentPath}` : basePath;
+  
+  const { data, error } = await supabaseService.storage
+    .from('project-files')
+    .list(fullPath, {
+      limit: 1000,
+      offset: 0
+    });
+    
+  if (error) {
+    console.error(`Failed to list files at ${fullPath}:`, error);
+    return [];
+  }
+  
+  let allFiles: any[] = [];
+  
+  for (const item of data) {
+    if (!item.name) continue;
+    
+    const itemPath = currentPath ? `${currentPath}/${item.name}` : item.name;
+    
+    // Add the current item with its path
+    allFiles.push({
+      ...item,
+      fullPath: itemPath
+    });
+    
+    // If this is a directory (no metadata means it's a folder), recursively get its contents
+    if (!item.id && !item.metadata) {
+      const childFiles = await getAllFilesRecursively(supabaseService, basePath, itemPath);
+      allFiles.push(...childFiles);
+    }
+  }
+  
+  return allFiles;
+}
+
 // File management endpoints
 app.get('/projects/:id/files/tree', authenticateUser, async (req: any, res: any) => {
   try {
     const { id } = req.params;
+    console.log(`[DEBUG] File tree request for project ${id}, user ${req.user?.id}`);
     
     const project = await db.getProjectById(id);
+    console.log(`[DEBUG] Project lookup result:`, project ? 'found' : 'not found');
     if (!project || project.userid !== req.user.id) {
+      console.log(`[DEBUG] Access denied - project.userid: ${project?.userid}, req.user.id: ${req.user.id}`);
       return res.status(404).json({ error: 'Project not found or access denied' });
     }
 
     if (!supabaseService) {
+      console.log(`[DEBUG] Supabase service not available`);
       return res.status(500).json({ error: 'Database not available' });
     }
+    
+    console.log(`[DEBUG] Attempting to list files from storage for project ${id} using path: ${req.user.id}/${id}/`);
 
-    // Get real file tree from Supabase Storage
+    // Get real file tree from Supabase Storage using recursive traversal
     try {
-      const { data: files, error } = await supabaseService.storage
-        .from('project-files')
-        .list(`${id}/`, {
-          limit: 100,
-          offset: 0
-        });
+      const basePath = `${req.user.id}/${id}`;
+      console.log(`[DEBUG] Getting all files recursively from: ${basePath}`);
+      
+      const allFiles = await getAllFilesRecursively(supabaseService, basePath);
+      console.log(`[DEBUG] Recursive traversal found ${allFiles.length} total files`);
 
-      if (error) {
-        console.error('Storage error:', error);
-        // Return template-based file structure if storage is empty
+      if (allFiles.length === 0) {
+        console.log(`[DEBUG] No files found, falling back to template`);
         const templateFiles = await getTemplateFileStructure(project.templatekey || 'next-prisma-supabase');
-        return res.json(templateFiles);
+        console.log(`[DEBUG] Returning template files:`, templateFiles?.length || 0);
+        return res.json({ tree: templateFiles });
       }
 
+      console.log(`[DEBUG] Building file tree from ${allFiles.length} storage files`);
       // Convert storage files to tree structure
-      const fileTree = await buildFileTreeFromStorage(files || [], id);
-      res.json(fileTree);
+      const fileTree = await buildFileTreeFromStorage(allFiles || [], id);
+      console.log(`[DEBUG] Built file tree with ${Array.isArray(fileTree) ? fileTree.length : 'non-array'} items`);
+      res.json({ tree: fileTree });
       
     } catch (storageError) {
       console.error('Storage not configured, returning template structure:', storageError);
       // Fallback to template-based structure
       const templateFiles = await getTemplateFileStructure(project.templatekey || 'next-prisma-supabase');
-      res.json(templateFiles);
+      res.json({ tree: templateFiles });
     }
   } catch (error) {
     console.error('Failed to get file tree:', error);
@@ -1671,6 +2449,102 @@ app.delete('/api/integrations/projects/:id/vercel', authenticateUser, async (req
   } catch (error) {
     console.error('Failed to disconnect Vercel:', error);
     res.status(500).json({ error: 'Failed to disconnect Vercel integration' });
+  }
+});
+
+// =============================================================================
+// USER SETTINGS API
+// =============================================================================
+
+// Get user settings
+app.get('/api/settings', authenticateUser, async (req: any, res: any) => {
+  try {
+    const userId = req.user.id;
+    
+    let settings = await db.getUserSettings(userId);
+    
+    // If no settings exist, create default settings
+    if (!settings) {
+      settings = await db.createUserSettings(userId);
+    }
+    
+    res.json({ settings });
+  } catch (error) {
+    console.error('Failed to get user settings:', error);
+    res.status(500).json({ error: 'Failed to retrieve settings' });
+  }
+});
+
+// Update user settings
+app.put('/api/settings', authenticateUser, async (req: any, res: any) => {
+  try {
+    const userId = req.user.id;
+    const updates = req.body;
+    
+    // Validate required fields if provided
+    if (updates.theme && !['light', 'dark', 'system'].includes(updates.theme)) {
+      return res.status(400).json({ error: 'Invalid theme value' });
+    }
+    if (updates.ai_response_style && !['concise', 'balanced', 'detailed'].includes(updates.ai_response_style)) {
+      return res.status(400).json({ error: 'Invalid AI response style' });
+    }
+    if (updates.layout_density && !['compact', 'comfortable'].includes(updates.layout_density)) {
+      return res.status(400).json({ error: 'Invalid layout density' });
+    }
+    
+    // Validate numeric ranges
+    if (updates.editor_font_size && (updates.editor_font_size < 8 || updates.editor_font_size > 32)) {
+      return res.status(400).json({ error: 'Font size must be between 8 and 32' });
+    }
+    if (updates.editor_tab_size && (updates.editor_tab_size < 1 || updates.editor_tab_size > 8)) {
+      return res.status(400).json({ error: 'Tab size must be between 1 and 8' });
+    }
+    if (updates.sidebar_width && (updates.sidebar_width < 200 || updates.sidebar_width > 600)) {
+      return res.status(400).json({ error: 'Sidebar width must be between 200 and 600' });
+    }
+    if (updates.auto_save_interval && (updates.auto_save_interval < 5 || updates.auto_save_interval > 300)) {
+      return res.status(400).json({ error: 'Auto-save interval must be between 5 and 300 seconds' });
+    }
+    
+    let settings = await db.getUserSettings(userId);
+    
+    // If no settings exist, create them first
+    if (!settings) {
+      settings = await db.createUserSettings(userId);
+    }
+    
+    // Update settings
+    const updatedSettings = await db.updateUserSettings(userId, updates);
+    
+    res.json({ settings: updatedSettings });
+  } catch (error) {
+    console.error('Failed to update user settings:', error);
+    res.status(500).json({ error: 'Failed to update settings' });
+  }
+});
+
+// Reset user settings to defaults
+app.delete('/api/settings', authenticateUser, async (req: any, res: any) => {
+  try {
+    const userId = req.user.id;
+    
+    // Soft delete current settings
+    await supabaseService
+      .from('user_settings')
+      .update({ 
+        deleted_at: new Date().toISOString(),
+        deleter: userId 
+      })
+      .eq('user_id', userId)
+      .is('deleted_at', null);
+    
+    // Create new default settings
+    const settings = await db.createUserSettings(userId);
+    
+    res.json({ settings });
+  } catch (error) {
+    console.error('Failed to reset user settings:', error);
+    res.status(500).json({ error: 'Failed to reset settings' });
   }
 });
 
