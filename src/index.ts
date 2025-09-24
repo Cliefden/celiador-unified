@@ -3,6 +3,8 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
+const { JSDOM } = require('jsdom');
+const { aiService } = require('./ai-service');
 
 const app = express();
 const port = parseInt(process.env.PORT || '8080', 10);
@@ -991,27 +993,199 @@ class PreviewManager {
     // Create src/app structure
     await fs.mkdir(path.join(localPath, 'src', 'app'), { recursive: true });
 
-    // Create layout.tsx
-    const layoutContent = `export default function RootLayout({
+    // Create inspection overlay component
+    const inspectionOverlayContent = `'use client';
+    
+import { useEffect, useState } from 'react';
+
+interface InspectableElement {
+  id: string;
+  type: string;
+  text: string;
+  selector: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export default function InspectionOverlay() {
+  const [elements, setElements] = useState<InspectableElement[]>([]);
+  const [isInspectionMode, setIsInspectionMode] = useState(false);
+
+  useEffect(() => {
+    // Check if inspection mode is enabled via URL parameter
+    const urlParams = new URLSearchParams(window.location.search);
+    const inspectionEnabled = urlParams.get('inspection') === 'true';
+    setIsInspectionMode(inspectionEnabled);
+    
+    if (!inspectionEnabled) return;
+
+    const scanForElements = () => {
+      // Find interactive elements
+      const selectors = [
+        'button',
+        'input',
+        'a[href]',
+        'div[onclick]',
+        'nav',
+        'header',
+        'main',
+        'section',
+        '[role="button"]',
+        '.clickable'
+      ];
+      
+      const foundElements: InspectableElement[] = [];
+      
+      selectors.forEach(selector => {
+        const elements = document.querySelectorAll(selector);
+        elements.forEach((element, index) => {
+          if (element.classList.contains('inspection-overlay')) return; // Skip our own overlays
+          
+          const rect = element.getBoundingClientRect();
+          const computedStyle = window.getComputedStyle(element);
+          
+          // Only include visible elements with some size
+          if (rect.width > 0 && rect.height > 0 && computedStyle.display !== 'none') {
+            foundElements.push({
+              id: \`\${selector.replace(/[^a-zA-Z0-9]/g, '_')}_\${index}\`,
+              type: element.tagName.toLowerCase(),
+              text: element.textContent?.trim().substring(0, 50) || '',
+              selector: selector,
+              x: rect.left + window.scrollX,
+              y: rect.top + window.scrollY,
+              width: rect.width,
+              height: rect.height
+            });
+          }
+        });
+      });
+      
+      setElements(foundElements);
+    };
+
+    // Initial scan
+    scanForElements();
+    
+    // Rescan on resize or scroll
+    const handleRescan = () => setTimeout(scanForElements, 100);
+    window.addEventListener('resize', handleRescan);
+    window.addEventListener('scroll', handleRescan);
+    
+    return () => {
+      window.removeEventListener('resize', handleRescan);
+      window.removeEventListener('scroll', handleRescan);
+    };
+  }, []);
+
+  const handleElementClick = (element: InspectableElement) => {
+    // Post message to parent frame (if in iframe)
+    const message = {
+      type: 'INSPECTION_ELEMENT_CLICKED',
+      element: element
+    };
+    
+    if (window.parent !== window) {
+      window.parent.postMessage(message, '*');
+    }
+    
+    console.log('Inspection element clicked:', element);
+  };
+
+  if (!isInspectionMode || elements.length === 0) {
+    return null;
+  }
+
+  return (
+    <>
+      {elements.map((element) => (
+        <div
+          key={element.id}
+          className="inspection-overlay"
+          onClick={() => handleElementClick(element)}
+          style={{
+            position: 'absolute',
+            left: element.x,
+            top: element.y,
+            width: element.width,
+            height: element.height,
+            backgroundColor: 'rgba(59, 130, 246, 0.3)',
+            border: '2px solid rgb(59, 130, 246)',
+            cursor: 'pointer',
+            zIndex: 10000,
+            pointerEvents: 'auto',
+            transition: 'all 0.2s ease',
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 0.5)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 0.3)';
+          }}
+        >
+          <div
+            style={{
+              position: 'absolute',
+              bottom: '100%',
+              left: 0,
+              backgroundColor: 'rgb(59, 130, 246)',
+              color: 'white',
+              padding: '2px 6px',
+              fontSize: '12px',
+              borderRadius: '2px',
+              whiteSpace: 'nowrap',
+              maxWidth: '200px',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            }}
+          >
+            {element.type}: {element.text}
+          </div>
+        </div>
+      ))}
+    </>
+  );
+}`;
+
+    await fs.writeFile(path.join(localPath, 'src', 'app', 'InspectionOverlay.tsx'), inspectionOverlayContent);
+
+    // Create layout.tsx with inspection support
+    const layoutContent = `import InspectionOverlay from './InspectionOverlay';
+
+export default function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        {children}
+        <InspectionOverlay />
+      </body>
     </html>
   );
 }`;
 
     await fs.writeFile(path.join(localPath, 'src', 'app', 'layout.tsx'), layoutContent);
 
-    // Create page.tsx
-    const pageContent = `export default function Home() {
+    // Create page.tsx with interactive elements
+    const pageContent = `'use client';
+
+export default function Home() {
   return (
     <main style={{ padding: '2rem', textAlign: 'center' }}>
       <h1>Project Preview</h1>
       <p>Your project is running in preview mode!</p>
+      <button onClick={() => alert('Button clicked!')}>
+        Click me!
+      </button>
+      <nav style={{ marginTop: '2rem', padding: '1rem', backgroundColor: '#f3f4f6' }}>
+        <a href="#" style={{ marginRight: '1rem' }}>Home</a>
+        <a href="#" style={{ marginRight: '1rem' }}>About</a>
+        <a href="#" style={{ marginRight: '1rem' }}>Contact</a>
+      </nav>
     </main>
   );
 }`;
@@ -1027,6 +1201,209 @@ const nextConfig = {
 module.exports = nextConfig`;
 
     await fs.writeFile(path.join(localPath, 'next.config.js'), nextConfig);
+  }
+
+  private async ensureInspectionOverlay(localPath: string): Promise<void> {
+    const fs = require('fs').promises;
+    const path = require('path');
+    
+    // Create InspectionOverlay.tsx in the app directory
+    const inspectionOverlayPath = path.join(localPath, 'app', 'InspectionOverlay.tsx');
+    const inspectionOverlayContent = `'use client';
+    
+import { useEffect, useState } from 'react';
+
+interface InspectableElement {
+  id: string;
+  type: string;
+  text: string;
+  selector: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export default function InspectionOverlay() {
+  const [elements, setElements] = useState<InspectableElement[]>([]);
+  const [isInspectionMode, setIsInspectionMode] = useState(false);
+
+  useEffect(() => {
+    // Check if inspection mode is enabled via URL parameter
+    const urlParams = new URLSearchParams(window.location.search);
+    const inspectionEnabled = urlParams.get('inspection') === 'true';
+    setIsInspectionMode(inspectionEnabled);
+    
+    if (!inspectionEnabled) return;
+
+    const scanForElements = () => {
+      // Find interactive elements
+      const selectors = [
+        'button',
+        'input',
+        'a[href]',
+        'div[onclick]',
+        'nav',
+        'header',
+        'main',
+        'section',
+        '[role="button"]',
+        '.clickable'
+      ];
+      
+      const foundElements: InspectableElement[] = [];
+      
+      selectors.forEach(selector => {
+        const elements = document.querySelectorAll(selector);
+        elements.forEach((element, index) => {
+          if (element.classList.contains('inspection-overlay')) return; // Skip our own overlays
+          
+          const rect = element.getBoundingClientRect();
+          const computedStyle = window.getComputedStyle(element);
+          
+          // Only include visible elements with some size
+          if (rect.width > 0 && rect.height > 0 && computedStyle.display !== 'none') {
+            foundElements.push({
+              id: \`\${selector.replace(/[^a-zA-Z0-9]/g, '_')}_\${index}\`,
+              type: element.tagName.toLowerCase(),
+              text: element.textContent?.trim().substring(0, 50) || '',
+              selector: selector,
+              x: rect.left + window.scrollX,
+              y: rect.top + window.scrollY,
+              width: rect.width,
+              height: rect.height
+            });
+          }
+        });
+      });
+      
+      setElements(foundElements);
+    };
+
+    // Initial scan
+    scanForElements();
+    
+    // Rescan on resize or scroll
+    const handleRescan = () => setTimeout(scanForElements, 100);
+    window.addEventListener('resize', handleRescan);
+    window.addEventListener('scroll', handleRescan);
+    
+    return () => {
+      window.removeEventListener('resize', handleRescan);
+      window.removeEventListener('scroll', handleRescan);
+    };
+  }, []);
+
+  const handleElementClick = (element: InspectableElement) => {
+    // Post message to parent frame (if in iframe)
+    const message = {
+      type: 'INSPECTION_ELEMENT_CLICKED',
+      element: element
+    };
+    
+    if (window.parent !== window) {
+      window.parent.postMessage(message, '*');
+    }
+    
+    console.log('Inspection element clicked:', element);
+  };
+
+  if (!isInspectionMode || elements.length === 0) {
+    return null;
+  }
+
+  return (
+    <>
+      {elements.map((element) => (
+        <div
+          key={element.id}
+          className="inspection-overlay"
+          onClick={() => handleElementClick(element)}
+          style={{
+            position: 'absolute',
+            left: element.x,
+            top: element.y,
+            width: element.width,
+            height: element.height,
+            backgroundColor: 'rgba(59, 130, 246, 0.3)',
+            border: '2px solid rgb(59, 130, 246)',
+            cursor: 'pointer',
+            zIndex: 10000,
+            pointerEvents: 'auto',
+            transition: 'all 0.2s ease',
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 0.5)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 0.3)';
+          }}
+        >
+          <div
+            style={{
+              position: 'absolute',
+              bottom: '100%',
+              left: 0,
+              backgroundColor: 'rgb(59, 130, 246)',
+              color: 'white',
+              padding: '2px 6px',
+              fontSize: '12px',
+              borderRadius: '2px',
+              whiteSpace: 'nowrap',
+              maxWidth: '200px',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            }}
+          >
+            {element.type}: {element.text}
+          </div>
+        </div>
+      ))}
+    </>
+  );
+}`;
+
+    try {
+      await fs.mkdir(path.join(localPath, 'app'), { recursive: true });
+      await fs.writeFile(inspectionOverlayPath, inspectionOverlayContent);
+      console.log(`[PreviewManager] Created InspectionOverlay.tsx`);
+    } catch (error) {
+      console.warn(`[PreviewManager] Failed to create InspectionOverlay.tsx:`, error);
+    }
+  }
+
+  private injectInspectionOverlay(layoutContent: string): string {
+    // Check if InspectionOverlay is already imported
+    if (layoutContent.includes('InspectionOverlay')) {
+      return layoutContent;
+    }
+    
+    try {
+      // Try to inject import and usage
+      let modifiedContent = layoutContent;
+      
+      // Add import after other imports
+      const lastImportMatch = modifiedContent.match(/^import.*$/gm);
+      if (lastImportMatch && lastImportMatch.length > 0) {
+        const lastImportLine = lastImportMatch[lastImportMatch.length - 1];
+        const lastImportIndex = modifiedContent.indexOf(lastImportLine) + lastImportLine.length;
+        modifiedContent = modifiedContent.slice(0, lastImportIndex) + 
+                         '\nimport InspectionOverlay from \'./InspectionOverlay\'' + 
+                         modifiedContent.slice(lastImportIndex);
+      }
+      
+      // Add component before closing </body> tag
+      modifiedContent = modifiedContent.replace(
+        '</body>',
+        '        <InspectionOverlay />\n      </body>'
+      );
+      
+      console.log(`[PreviewManager] Injected InspectionOverlay into layout.tsx`);
+      return modifiedContent;
+    } catch (error) {
+      console.warn(`[PreviewManager] Failed to inject InspectionOverlay:`, error);
+      return layoutContent;
+    }
   }
 
   private async startDevServer(instance: PreviewInstance, type: string): Promise<void> {
@@ -1740,6 +2117,226 @@ app.post('/projects/:id/conversations', authenticateUser, async (req: any, res: 
   }
 });
 
+// Chat endpoint for AI conversations
+app.post('/projects/:id/chat', authenticateUser, async (req: any, res: any) => {
+  const { id: projectId } = req.params;
+  const { message, conversationId, history, provider = 'openai' } = req.body;
+  
+  try {
+    console.log(`[Chat] Processing message for project ${projectId}, conversation ${conversationId}`);
+    console.log(`[Chat] Message length: ${message?.length || 0}, History length: ${history?.length || 0}`);
+    
+    if (!aiService.isAvailable()) {
+      throw new Error('AI service not available - check API keys in environment variables');
+    }
+    
+    // Get project details and files for context
+    console.log(`[Chat] Fetching project files for context...`);
+    const projectFiles = await getProjectFilesForAI(projectId, req.user.id);
+    console.log(`[Chat] Found ${Object.keys(projectFiles.file_contents).length} project files`);
+    
+    // Build conversation messages for AI
+    const messages: any[] = [];
+    
+    // Add system prompt with project context including files
+    const systemPrompt = aiService.createDevelopmentSystemPrompt({
+      name: `Project ${projectId}`,
+      description: 'A Next.js project with Celiador inspection capabilities',
+      tech_stack: ['Next.js', 'React', 'TypeScript', 'Tailwind CSS'],
+      current_files: projectFiles.current_files,
+      file_contents: projectFiles.file_contents
+    });
+    messages.push({ role: 'system', content: systemPrompt });
+    
+    // Add conversation history
+    if (history && Array.isArray(history)) {
+      messages.push(...history);
+    }
+    
+    // Add current user message
+    messages.push({ role: 'user', content: message });
+    
+    console.log(`[Chat] Calling AI service with ${messages.length} messages`);
+    
+    // Get AI response
+    const aiResult = await aiService.generateResponse(messages, { provider });
+    
+    // Parse actions from response
+    const parsedActions = aiService.parseActionsFromResponse(aiResult.content);
+    
+    const aiResponse = {
+      response: aiResult.content,
+      actions: parsedActions.hasActions ? parsedActions.actions : null,
+      conversationId,
+      timestamp: new Date().toISOString(),
+      usage: aiResult.usage
+    };
+    
+    console.log(`[Chat] AI response generated: ${aiResult.content.length} chars, ${parsedActions.actions.length} actions`);
+    res.json(aiResponse);
+    
+  } catch (error: any) {
+    console.error(`Failed to process chat message for project ${projectId}:`, error);
+    res.status(500).json({ 
+      error: 'Failed to process chat message',
+      details: error.message 
+    });
+  }
+});
+
+// Helper function to get project files for AI context
+async function getProjectFilesForAI(projectId: string, userId: string): Promise<{
+  current_files: string[];
+  file_contents: { [key: string]: string };
+}> {
+  try {
+    // Use the correct path pattern from bucket exploration: userId/projectId
+    console.log(`[Chat] Using discovered path pattern: ${userId}/${projectId}`);
+    const basePath = `${userId}/${projectId}`;
+    console.log(`[Chat] Looking for files at: ${basePath}`);
+    
+    // Get all files using the correct path
+    const allFiles = await getAllFilesRecursivelyForAI(basePath);
+    console.log(`[Chat] Found ${allFiles.length} files at: ${basePath}`);
+    
+    if (allFiles.length === 0) {
+      console.log(`[Chat] No files found in any path pattern, exploring root bucket...`);
+      
+      // Explore the bucket structure to understand what's actually there
+      try {
+        const { data: rootFiles, error: rootError } = await supabaseService!.storage
+          .from('project-files')
+          .list('', { limit: 100 });
+        
+        if (!rootError && rootFiles) {
+          console.log(`[Chat] Root bucket contains ${rootFiles.length} items:`, rootFiles.map(f => f.name));
+          
+          // Try to find any folder that might contain our project
+          for (const rootItem of rootFiles) {
+            if (rootItem.name && !rootItem.id) { // It's a folder
+              console.log(`[Chat] Exploring folder: ${rootItem.name}`);
+              const { data: folderFiles, error: folderError } = await supabaseService!.storage
+                .from('project-files')
+                .list(rootItem.name, { limit: 50 });
+              
+              if (!folderError && folderFiles) {
+                console.log(`[Chat] Folder ${rootItem.name} contains:`, folderFiles.map(f => f.name));
+              }
+            }
+          }
+        }
+      } catch (explorationError) {
+        console.error(`[Chat] Error exploring bucket:`, explorationError);
+      }
+      
+      return { current_files: [], file_contents: {} };
+    }
+    
+    const fileContents: { [key: string]: string } = {};
+    const currentFiles: string[] = [];
+    
+    // Download and read key project files (limit to important ones for AI context)
+    const importantFiles = allFiles.filter(file => {
+      const filePath = file.fullPath || file.name;
+      return (
+        filePath.endsWith('.tsx') ||
+        filePath.endsWith('.ts') ||
+        filePath.endsWith('.jsx') ||
+        filePath.endsWith('.js') ||
+        filePath.endsWith('.json') ||
+        filePath.includes('layout') ||
+        filePath.includes('page') ||
+        filePath.includes('component') ||
+        filePath === 'package.json' ||
+        filePath === 'tailwind.config.js' ||
+        filePath === 'next.config.js'
+      );
+    }).slice(0, 15); // Limit to 15 most important files
+    
+    console.log(`[Chat] Downloading ${importantFiles.length} important files for AI context`);
+    
+    for (const file of importantFiles) {
+      // Skip directories
+      if (!file.id && !file.metadata) {
+        continue;
+      }
+      
+      const filePath = file.fullPath || file.name;
+      try {
+        const { data: fileData, error: downloadError } = await supabaseService!.storage
+          .from('project-files')
+          .download(`${basePath}/${filePath}`);
+          
+        if (!downloadError && fileData) {
+          const content = await fileData.text();
+          fileContents[filePath] = content;
+          currentFiles.push(filePath);
+          console.log(`[Chat] Downloaded: ${filePath} (${content.length} chars)`);
+        } else {
+          console.warn(`[Chat] Failed to download ${filePath}:`, downloadError?.message);
+        }
+      } catch (fileError) {
+        console.warn(`[Chat] Error downloading ${filePath}:`, fileError);
+      }
+    }
+    
+    console.log(`[Chat] Successfully loaded ${Object.keys(fileContents).length} files for AI context`);
+    return { current_files: currentFiles, file_contents: fileContents };
+    
+  } catch (error) {
+    console.error(`[Chat] Error fetching project files:`, error);
+    return { current_files: [], file_contents: {} };
+  }
+}
+
+// Get all files recursively for AI context (reuse PreviewManager logic)
+async function getAllFilesRecursivelyForAI(basePath: string, currentPath = ''): Promise<any[]> {
+  const fullPath = currentPath ? `${basePath}/${currentPath}` : basePath;
+  
+  try {
+    console.log(`[Chat] Listing files at: ${fullPath}`);
+    const { data, error } = await supabaseService!.storage
+      .from('project-files')
+      .list(fullPath, {
+        limit: 1000,
+        offset: 0
+      });
+      
+    if (error) {
+      console.error(`[Chat] Failed to list files at ${fullPath}:`, error);
+      return [];
+    }
+    
+    console.log(`[Chat] Found ${data?.length || 0} items at ${fullPath}:`, data?.map(item => `${item.name} (id: ${item.id})`));
+    
+    let allFiles: any[] = [];
+    
+    for (const item of data || []) {
+      if (!item.name) continue;
+      
+      const itemPath = currentPath ? `${currentPath}/${item.name}` : item.name;
+      
+      // Add the current item with its path
+      allFiles.push({
+        ...item,
+        fullPath: itemPath
+      });
+      
+      // If this is a directory (no metadata means it's a folder), recursively get its contents
+      if (!item.id && !item.metadata) {
+        console.log(`[Chat] Recursing into directory: ${itemPath}`);
+        const childFiles = await getAllFilesRecursivelyForAI(basePath, itemPath);
+        allFiles.push(...childFiles);
+      }
+    }
+    
+    return allFiles;
+  } catch (error) {
+    console.error(`[Chat] Error in getAllFilesRecursivelyForAI:`, error);
+    return [];
+  }
+}
+
 app.get('/conversations/:id/messages', authenticateUser, async (req: any, res: any) => {
   try {
     const { id } = req.params;
@@ -2121,6 +2718,459 @@ app.get('/projects/:id/preview/list', authenticateUser, async (req: any, res: an
     res.status(500).json({ error: 'Failed to list previews' });
   }
 });
+
+console.log('✅ [Preview Proxy] Routes registered at /projects/:id/preview/:previewId/proxy/*');
+
+// Proxy handler function
+const handleProxyRequest = async (req: any, res: any) => {
+  console.log(`🔄 [Preview Proxy] Request received for project ${req.params.id}, preview ${req.params.previewId}`);
+  console.log(`🔄 [Preview Proxy] Full request URL: ${req.url}`);
+  
+  // Handle authentication via query parameter for iframe requests
+  const token = req.query.token;
+  if (!token) {
+    console.log(`❌ [Preview Proxy] No token provided`);
+    return res.status(401).json({ error: 'Authentication token required' });
+  }
+  
+  try {
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+    if (error || !user) {
+      return res.status(401).json({ error: 'Invalid authentication token' });
+    }
+    req.user = user;
+  } catch (error) {
+    return res.status(401).json({ error: 'Authentication failed' });
+  }
+  try {
+    const { id, previewId } = req.params;
+    const enableInspection = req.query.inspection === 'true';
+    
+    console.log(`[Preview Proxy] Proxying preview ${previewId} with inspection: ${enableInspection}`);
+    
+    // Get the preview instance
+    console.log(`🔍 [Preview Proxy] Looking for preview: ${previewId}`);
+    const preview = previewManager.getPreview(previewId);
+    console.log(`🔍 [Preview Proxy] Found preview:`, preview ? { id: preview.id, status: preview.status, url: preview.url } : 'null');
+    
+    if (!preview || preview.status !== 'running') {
+      console.log(`❌ [Preview Proxy] Preview not found or not running. Status: ${preview?.status || 'null'}`);
+      return res.status(404).json({ error: 'Preview not found or not running' });
+    }
+    
+    // Build target URL - append the additional path from the request
+    const additionalPath = req.params[0] || ''; // Get the wildcard part
+    const targetUrl = additionalPath ? `${preview.url}/${additionalPath}` : preview.url;
+    
+    // Fetch the original preview content
+    console.log(`📡 [Preview Proxy] Fetching content from: ${targetUrl}`);
+    const originalResponse = await fetch(targetUrl);
+    if (!originalResponse.ok) {
+      return res.status(originalResponse.status).json({ error: 'Failed to fetch preview content' });
+    }
+    
+    const contentType = originalResponse.headers.get('content-type') || 'text/html';
+    
+    // Only inject inspection script for the root HTML page (not for CSS/JS assets)
+    const isRootRequest = !additionalPath || additionalPath === '';
+    if (contentType.includes('text/html') && enableInspection && isRootRequest) {
+      let html = await originalResponse.text();
+      
+      // Rewrite relative URLs to go through the proxy
+      const proxyBasePath = `/projects/${id}/preview/${previewId}/proxy`;
+      
+      // Rewrite _next URLs to go through proxy
+      html = html.replace(/href="(\/_next\/[^"]+)"/g, `href="${proxyBasePath}$1"`);
+      html = html.replace(/src="(\/_next\/[^"]+)"/g, `src="${proxyBasePath}$1"`);
+      html = html.replace(/href='(\/_next\/[^']+)'/g, `href='${proxyBasePath}$1'`);
+      html = html.replace(/src='(\/_next\/[^']+)'/g, `src='${proxyBasePath}$1'`);
+      
+      console.log('✅ [Preview Proxy] Rewritten relative URLs to use proxy paths');
+      
+      // Simple inspection script
+      const inspectionScript = `
+<script>
+console.log('🎯 Celiador Inspection Script Loaded');
+
+window.celiadorInspection = {
+  enabled: false,
+  elements: [],
+  
+  scan: function() {
+    console.log('🔍 Scanning for elements...');
+    this.elements = [];
+    
+    const selectors = 'button, input, a[href], div[class], nav, header, main, section';
+    const foundElements = document.querySelectorAll(selectors);
+    
+    foundElements.forEach((el, i) => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 10 && rect.height > 10) {
+        this.elements.push({
+          id: 'element-' + i,
+          type: el.tagName.toLowerCase(),
+          selector: el.className ? el.tagName.toLowerCase() + '.' + el.className.split(' ')[0] : el.tagName.toLowerCase(),
+          boundingBox: {
+            x: rect.left,
+            y: rect.top,
+            width: rect.width,
+            height: rect.height
+          },
+          text: el.textContent?.slice(0, 50) || ''
+        });
+      }
+    });
+    
+    // Send elements to parent
+    window.parent.postMessage({
+      type: 'ELEMENTS_MAPPED',
+      elements: this.elements
+    }, '*');
+    
+    console.log('📡 Found and sent', this.elements.length, 'elements');
+  },
+  
+  toggle: function(enabled) {
+    this.enabled = enabled;
+    console.log('🔄 Inspection', enabled ? 'enabled' : 'disabled');
+    if (enabled) {
+      this.scan();
+    } else {
+      this.elements = [];
+    }
+  }
+};
+
+// Listen for messages from parent
+window.addEventListener('message', (event) => {
+  if (event.data.type === 'ENABLE_INSPECTION') {
+    window.celiadorInspection.toggle(true);
+  } else if (event.data.type === 'DISABLE_INSPECTION') {
+    window.celiadorInspection.toggle(false);
+  }
+});
+
+console.log('✅ Celiador Inspection Ready');
+</script>`;
+      
+      // Inject before closing </body> tag
+      if (html.includes('</body>')) {
+        html = html.replace('</body>', inspectionScript + '\n</body>');
+      } else {
+        html += inspectionScript;
+      }
+      
+      console.log('✅ [Preview Proxy] Injected inspection script');
+      
+      res.setHeader('Content-Type', 'text/html');
+      res.send(html);
+    } else if (contentType.includes('text/html') && isRootRequest) {
+      // HTML without inspection - still need to rewrite URLs
+      let html = await originalResponse.text();
+      
+      // Rewrite relative URLs to go through the proxy
+      const proxyBasePath = `/projects/${id}/preview/${previewId}/proxy`;
+      
+      // Rewrite _next URLs to go through proxy
+      html = html.replace(/href="(\/_next\/[^"]+)"/g, `href="${proxyBasePath}$1"`);
+      html = html.replace(/src="(\/_next\/[^"]+)"/g, `src="${proxyBasePath}$1"`);
+      html = html.replace(/href='(\/_next\/[^']+)'/g, `href='${proxyBasePath}$1'`);
+      html = html.replace(/src='(\/_next\/[^']+)'/g, `src='${proxyBasePath}$1'`);
+      
+      console.log('✅ [Preview Proxy] Rewritten URLs for HTML without inspection');
+      
+      res.setHeader('Content-Type', 'text/html');
+      res.send(html);
+    } else {
+      // For non-HTML content (CSS, JS, images), just proxy through
+      const buffer = await originalResponse.arrayBuffer();
+      res.setHeader('Content-Type', contentType);
+      res.send(Buffer.from(buffer));
+    }
+    
+  } catch (error) {
+    console.error('Preview proxy error:', error);
+    res.status(500).json({ error: 'Failed to proxy preview content' });
+  }
+};
+
+// Register both routes - root and wildcard paths
+app.get('/projects/:id/preview/:previewId/proxy', handleProxyRequest);
+app.get('/projects/:id/preview/:previewId/proxy/*', handleProxyRequest);
+
+console.log('✅ [Inspection Preview] Route registered at /projects/:id/preview/:previewId/inspection');
+
+// New inspection preview endpoint - generates server-side inspection overlay
+app.get('/projects/:id/preview/:previewId/inspection', async (req: any, res: any) => {
+  console.log(`🔍 [Inspection Preview] Request for project ${req.params.id}, preview ${req.params.previewId}`);
+  
+  // Handle authentication via query parameter for iframe requests
+  const token = req.query.token;
+  if (!token) {
+    console.log(`❌ [Inspection Preview] No token provided`);
+    return res.status(401).json({ error: 'Authentication token required' });
+  }
+  
+  try {
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+    if (error || !user) {
+      return res.status(401).json({ error: 'Invalid authentication token' });
+    }
+    req.user = user;
+  } catch (error) {
+    return res.status(401).json({ error: 'Authentication failed' });
+  }
+  
+  try {
+    const { id, previewId } = req.params;
+    
+    console.log(`[Inspection Preview] Generating inspection layer for preview ${previewId}`);
+    
+    // Get the preview instance
+    console.log(`🔍 [Inspection Preview] Looking for preview: ${previewId}`);
+    const preview = previewManager.getPreview(previewId);
+    console.log(`🔍 [Inspection Preview] Found preview:`, preview ? { id: preview.id, status: preview.status, url: preview.url } : 'null');
+    
+    if (!preview || preview.status !== 'running') {
+      console.log(`❌ [Inspection Preview] Preview not found or not running. Status: ${preview?.status || 'null'}`);
+      return res.status(404).json({ error: 'Preview not found or not running' });
+    }
+    
+    // Fetch the original preview HTML
+    console.log(`📡 [Inspection Preview] Fetching original content from: ${preview.url}`);
+    const originalResponse = await fetch(preview.url);
+    if (!originalResponse.ok) {
+      return res.status(originalResponse.status).json({ error: 'Failed to fetch preview content' });
+    }
+    
+    const originalHtml = await originalResponse.text();
+    
+    // Generate inspection overlay HTML with URL rewriting for assets
+    const inspectionHtml = await generateInspectionOverlay(originalHtml, id, previewId, preview.url);
+    
+    console.log('✅ [Inspection Preview] Generated inspection overlay HTML');
+    
+    res.setHeader('Content-Type', 'text/html');
+    res.send(inspectionHtml);
+    
+  } catch (error) {
+    console.error('Inspection preview error:', error);
+    res.status(500).json({ error: 'Failed to generate inspection preview' });
+  }
+});
+
+// Generate inspection overlay HTML with clickable elements
+async function generateInspectionOverlay(originalHtml: string, projectId: string, previewId: string, originalPreviewUrl: string): Promise<string> {
+  console.log('🔍 [Inspection Overlay] Parsing HTML and generating inspection layer');
+  
+  try {
+    // Parse the HTML with JSDOM
+    const dom = new JSDOM(originalHtml);
+    const document = dom.window.document;
+    
+    // Find all interactive elements
+    const selectors = [
+      'button',
+      'input',
+      'a[href]',
+      'div[onclick]',
+      'span[onclick]',
+      '[role="button"]',
+      'nav',
+      'header',
+      'main',
+      'section',
+      '.btn',
+      '.button',
+      '[class*="btn"]'
+    ];
+    
+    const elements: any[] = [];
+    let elementIndex = 0;
+    
+    // Scan for elements using each selector
+    selectors.forEach(selector => {
+      const foundElements = document.querySelectorAll(selector);
+      foundElements.forEach((el: any) => {
+        // Skip elements that are too small or hidden
+        const computedStyle = el.style || {};
+        if (computedStyle.display === 'none' || computedStyle.visibility === 'hidden') {
+          return;
+        }
+        
+        // Get element info
+        const tagName = el.tagName.toLowerCase();
+        const className = el.className || '';
+        const id = el.id || '';
+        const textContent = (el.textContent || '').trim().substring(0, 100);
+        
+        // Create unique selector
+        let elementSelector = tagName;
+        if (id) elementSelector += `#${id}`;
+        if (className && typeof className === 'string') {
+          const firstClass = className.split(' ')[0];
+          if (firstClass) elementSelector += `.${firstClass}`;
+        }
+        
+        const elementData = {
+          index: elementIndex++,
+          tagName,
+          selector: elementSelector,
+          className: className,
+          id: id,
+          textContent,
+          type: getElementType(tagName, className, textContent)
+        };
+        
+        elements.push(elementData);
+        
+        // Add inspection data attributes to the element
+        el.setAttribute('data-celiador-element', JSON.stringify(elementData));
+        el.setAttribute('data-celiador-index', elementData.index.toString());
+      });
+    });
+    
+    console.log(`🔍 [Inspection Overlay] Found ${elements.length} interactive elements`);
+    
+    // Rewrite relative URLs to point to original preview server using string replacement
+    let htmlString = dom.serialize();
+    
+    // Debug: Log a sample of the HTML to see what URLs actually exist
+    const sampleHtml = htmlString.substring(0, 2000);
+    console.log(`🔍 [Debug] Sample HTML before URL rewriting:`, sampleHtml);
+    
+    // Count matches before replacement
+    const nextHrefMatches = (htmlString.match(/href="(\/_next\/[^"]+)"/g) || []).length;
+    const nextSrcMatches = (htmlString.match(/src="(\/_next\/[^"]+)"/g) || []).length;
+    console.log(`🔍 [Debug] Found ${nextHrefMatches} href="_next" and ${nextSrcMatches} src="_next" matches`);
+    
+    // Replace all relative URLs with absolute URLs pointing to the original preview server
+    htmlString = htmlString.replace(/href="(\/_next\/[^"]+)"/g, `href="${originalPreviewUrl}$1"`);
+    htmlString = htmlString.replace(/src="(\/_next\/[^"]+)"/g, `src="${originalPreviewUrl}$1"`);
+    htmlString = htmlString.replace(/href='(\/_next\/[^']+)'/g, `href='${originalPreviewUrl}$1'`);
+    htmlString = htmlString.replace(/src='(\/_next\/[^']+)'/g, `src='${originalPreviewUrl}$1'`);
+    
+    // Also fix any other relative URLs that start with /
+    htmlString = htmlString.replace(/href="(\/[^"_][^"]*(?<!\/_next)[^"]*\.(css|js|ico|png|jpg|jpeg|svg|woff|woff2))"/g, `href="${originalPreviewUrl}$1"`);
+    htmlString = htmlString.replace(/src="(\/[^"_][^"]*(?<!\/_next)[^"]*\.(js|png|jpg|jpeg|svg|woff|woff2))"/g, `src="${originalPreviewUrl}$1"`);
+    
+    console.log(`✅ [Inspection Overlay] Rewritten asset URLs using string replacement for: ${originalPreviewUrl}`);
+    
+    // Add inspection overlay styles and script directly to the HTML string
+    const inspectionStyles = `
+<style id="celiador-inspection-styles">
+  [data-celiador-element] {
+    position: relative;
+    cursor: pointer !important;
+  }
+  
+  [data-celiador-element]:hover {
+    outline: 2px solid #3b82f6 !important;
+    outline-offset: -2px !important;
+    background-color: rgba(59, 130, 246, 0.1) !important;
+  }
+  
+  [data-celiador-element]:hover::after {
+    content: attr(data-celiador-type) " - " attr(data-celiador-text);
+    position: absolute;
+    top: -30px;
+    left: 0;
+    background: #3b82f6;
+    color: white;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    white-space: nowrap;
+    z-index: 10000;
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  
+  .celiador-inspection-active [data-celiador-element] {
+    pointer-events: auto !important;
+  }
+</style>`;
+
+    const inspectionScript = `
+<script id="celiador-inspection-script">
+  console.log('🎯 Celiador Server-Side Inspection Ready');
+  
+  // Add inspection class to body
+  document.body.classList.add('celiador-inspection-active');
+  
+  // Handle element clicks
+  document.addEventListener('click', function(event) {
+    const element = event.target.closest('[data-celiador-element]');
+    if (element) {
+      event.preventDefault();
+      event.stopPropagation();
+      
+      const elementData = JSON.parse(element.getAttribute('data-celiador-element') || '{}');
+      console.log('🎯 Celiador Element Clicked:', elementData);
+      
+      // Send element data to parent window (Celiador dashboard)
+      window.parent.postMessage({
+        type: 'ELEMENT_SELECTED',
+        element: elementData
+      }, '*');
+    }
+  });
+  
+  // Add hover data attributes for CSS tooltips
+  document.querySelectorAll('[data-celiador-element]').forEach(function(el, index) {
+    const data = JSON.parse(el.getAttribute('data-celiador-element') || '{}');
+    el.setAttribute('data-celiador-type', data.type || 'element');
+    el.setAttribute('data-celiador-text', (data.textContent || data.selector || '').substring(0, 50));
+  });
+  
+  console.log('🎯 Celiador Inspection Layer Active - ' + document.querySelectorAll('[data-celiador-element]').length + ' elements ready');
+</script>`;
+    
+    // Insert styles before </head> in HTML string
+    if (htmlString.includes('</head>')) {
+      htmlString = htmlString.replace('</head>', inspectionStyles + '\n</head>');
+    }
+    
+    // Insert script before </body> in HTML string  
+    if (htmlString.includes('</body>')) {
+      htmlString = htmlString.replace('</body>', inspectionScript + '\n</body>');
+    } else {
+      // If no </body> tag, append at end
+      htmlString += inspectionScript;
+    }
+    
+    console.log('✅ [Inspection Overlay] Generated inspection overlay with server-side element detection and URL rewriting');
+    
+    return htmlString;
+    
+  } catch (error) {
+    console.error('❌ [Inspection Overlay] Error generating overlay:', error);
+    // Fallback: return original HTML with basic inspection layer
+    return originalHtml + `
+<script>
+  console.log('⚠️ Celiador Inspection - Fallback mode');
+  window.parent.postMessage({ type: 'INSPECTION_ERROR', error: 'Failed to generate overlay' }, '*');
+</script>`;
+  }
+}
+
+// Helper function to determine element type
+function getElementType(tagName: string, className: string, textContent: string): string {
+  if (tagName === 'button' || className.includes('btn') || className.includes('button')) {
+    return 'button';
+  }
+  if (tagName === 'input') return 'input';
+  if (tagName === 'a') return 'link';
+  if (tagName === 'nav') return 'navigation';
+  if (tagName === 'header') return 'header';
+  if (tagName === 'main') return 'main-content';
+  if (tagName === 'section') return 'section';
+  if (className.includes('card')) return 'card';
+  if (className.includes('menu')) return 'menu';
+  if (textContent.toLowerCase().includes('search')) return 'search';
+  return 'interactive-element';
+}
 
 // Recursive file listing helper function
 async function getAllFilesRecursively(supabaseService: any, basePath: string, currentPath = ''): Promise<any[]> {
