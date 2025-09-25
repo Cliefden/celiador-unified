@@ -658,7 +658,8 @@ interface PreviewInstance {
   projectId: string;
   userId: string;
   port: number;
-  url: string;
+  url: string; // External proxy URL for client access
+  internalUrl?: string; // Internal localhost URL for server-side fetching
   status: 'syncing' | 'starting' | 'running' | 'error' | 'stopped';
   process?: any;
   localPath?: string;
@@ -715,12 +716,21 @@ class PreviewManager {
     const instanceId = `${projectId}-${Date.now()}`;
     const port = await this.portManager.allocatePort();
     
+    // Construct the proxy URL for Railway deployment
+    const baseUrl = process.env.NODE_ENV === 'production' 
+      ? (process.env.RAILWAY_PUBLIC_DOMAIN || 'https://celiador-unified-production.up.railway.app')
+      : 'http://localhost:' + (process.env.PORT || '4000');
+    
+    const proxyUrl = `${baseUrl}/projects/${projectId}/preview/${instanceId}/proxy/`;
+    const internalUrl = `http://localhost:${port}`; // Keep internal URL for server-side fetching
+    
     const instance: PreviewInstance = {
       id: instanceId,
       projectId,
       userId,
       port,
-      url: `http://localhost:${port}`,
+      url: proxyUrl, // External URL for client access
+      internalUrl, // Internal URL for server-side proxy fetching
       status: 'syncing',
       startTime: new Date(),
       lastAccessed: new Date()
@@ -2592,7 +2602,10 @@ app.post('/projects/:id/preview/start', authenticateUser, async (req: any, res: 
     const { id } = req.params;
     const { name, type } = req.body;
     
-    console.log(`Starting preview for project ${id}:`, { name, type });
+    console.log(`🚀 [PREVIEW START] Starting preview for project ${id}:`, { name, type });
+    console.log(`🔧 [PREVIEW START] Environment: NODE_ENV=${process.env.NODE_ENV}, PORT=${process.env.PORT}`);
+    console.log(`💾 [PREVIEW START] Memory usage:`, process.memoryUsage());
+    console.log(`🌍 [PREVIEW START] Platform:`, process.platform, process.arch);
     
     const project = await db.getProjectById(id);
     if (!project || project.userid !== req.user.id) {
@@ -2600,12 +2613,17 @@ app.post('/projects/:id/preview/start', authenticateUser, async (req: any, res: 
     }
 
     // Start real preview using PreviewManager
+    console.log(`📋 [PREVIEW START] Project found:`, { name: project.name, userid: project.userid });
+    console.log(`⚡ [PREVIEW START] Calling previewManager.startPreview...`);
+    
     const preview = await previewManager.startPreview(
       id,
       req.user.id,
       name || project.name || 'Project Preview',
       type || 'nextjs'
     );
+    
+    console.log(`✅ [PREVIEW START] Preview created successfully:`, { id: preview.id, status: preview.status, url: preview.url });
     
     res.status(201).json({
       success: true,
@@ -2626,8 +2644,16 @@ app.post('/projects/:id/preview/start', authenticateUser, async (req: any, res: 
       }
     });
   } catch (error) {
-    console.error('Failed to start preview:', error);
-    res.status(500).json({ error: 'Failed to start preview' });
+    console.error(`❌ [PREVIEW START] Failed to start preview for project ${req.params.id}:`, error);
+    console.error(`❌ [PREVIEW START] Error type:`, error.constructor.name);
+    console.error(`❌ [PREVIEW START] Error message:`, error.message);
+    console.error(`❌ [PREVIEW START] Error stack:`, error.stack);
+    console.log(`💾 [PREVIEW START] Memory usage after error:`, process.memoryUsage());
+    
+    res.status(500).json({ 
+      error: 'Failed to start preview', 
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined 
+    });
   }
 });
 
@@ -2774,7 +2800,8 @@ const handleProxyRequest = async (req: any, res: any) => {
     
     // Build target URL - append the additional path from the request
     const additionalPath = req.params[0] || ''; // Get the wildcard part
-    const targetUrl = additionalPath ? `${preview.url}/${additionalPath}` : preview.url;
+    const baseUrl = preview.internalUrl || `http://localhost:${preview.port}`;
+    const targetUrl = additionalPath ? `${baseUrl}/${additionalPath}` : baseUrl;
     
     // Fetch the original preview content
     console.log(`📡 [Preview Proxy] Fetching content from: ${targetUrl}`);
