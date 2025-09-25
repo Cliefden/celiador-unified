@@ -1473,6 +1473,35 @@ export default function InspectionOverlay() {
       });
     });
 
+    // Check if TypeScript is needed and install TypeScript dependencies
+    const fs = require('fs');
+    const tsconfigPath = `${instance.localPath}/tsconfig.json`;
+    if (fs.existsSync(tsconfigPath)) {
+      console.log(`[PreviewManager] TypeScript detected, installing TypeScript dependencies for ${instance.id}`);
+      const tsInstallArgs = packageManager === 'yarn' 
+        ? ['add', '-D', 'typescript', '@types/react', '@types/node']
+        : packageManager === 'pnpm'
+        ? ['add', '-D', 'typescript', '@types/react', '@types/node'] 
+        : ['install', '--save-dev', 'typescript', '@types/react', '@types/node'];
+      
+      const tsInstallProcess = spawn(installCmd, tsInstallArgs, {
+        cwd: instance.localPath,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+
+      await new Promise((resolve, reject) => {
+        tsInstallProcess.on('close', (code: number) => {
+          if (code === 0) {
+            console.log(`[PreviewManager] TypeScript dependencies installed successfully for ${instance.id}`);
+            resolve(void 0);
+          } else {
+            console.error(`[PreviewManager] TypeScript dependency installation failed with code ${code} for ${instance.id}`);
+            reject(new Error(`TypeScript dependency installation failed with code ${code}`));
+          }
+        });
+      });
+    }
+
     // Start dev server
     console.log(`[PreviewManager] Starting dev server for ${instance.id} on port ${instance.port} using ${packageManager}`);
     
@@ -1510,14 +1539,34 @@ export default function InspectionOverlay() {
       });
 
       devProcess.stderr.on('data', (data: any) => {
-        console.error(`[Preview ${instance.id} ERROR]:`, data.toString().trim());
+        const errorMsg = data.toString().trim();
+        console.error(`[Preview ${instance.id} ERROR]:`, errorMsg);
+        
+        // Check for critical errors that should mark preview as failed
+        if (errorMsg.includes('FatalError') || errorMsg.includes('Cannot find module') || errorMsg.includes('EADDRINUSE')) {
+          console.error(`[Preview ${instance.id}] Critical error detected, marking as failed`);
+          instance.status = 'error';
+          instance.errorMessage = errorMsg;
+        }
       });
 
       devProcess.on('close', (code: number) => {
         clearTimeout(timeout);
+        console.log(`[Preview ${instance.id}] Process exited with code: ${code}`);
+        
         if (code !== 0) {
+          instance.status = 'error';
+          instance.errorMessage = `Dev server exited with code ${code}`;
           reject(new Error(`Dev server exited with code ${code}`));
         }
+      });
+
+      devProcess.on('error', (error: any) => {
+        clearTimeout(timeout);
+        console.error(`[Preview ${instance.id}] Process error:`, error);
+        instance.status = 'error';
+        instance.errorMessage = error.message;
+        reject(error);
       });
     });
   }
