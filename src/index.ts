@@ -2209,7 +2209,7 @@ async function getProjectFilesForAI(projectId: string, userId: string): Promise<
           .list('', { limit: 100 });
         
         if (!rootError && rootFiles) {
-          console.log(`[Chat] Root bucket contains ${rootFiles.length} items:`, rootFiles.map(f => f.name));
+          console.log(`[Chat] Root bucket contains ${rootFiles.length} items:`, rootFiles.map((f: any) => f.name));
           
           // Try to find any folder that might contain our project
           for (const rootItem of rootFiles) {
@@ -2220,7 +2220,7 @@ async function getProjectFilesForAI(projectId: string, userId: string): Promise<
                 .list(rootItem.name, { limit: 50 });
               
               if (!folderError && folderFiles) {
-                console.log(`[Chat] Folder ${rootItem.name} contains:`, folderFiles.map(f => f.name));
+                console.log(`[Chat] Folder ${rootItem.name} contains:`, folderFiles.map((f: any) => f.name));
               }
             }
           }
@@ -2307,7 +2307,7 @@ async function getAllFilesRecursivelyForAI(basePath: string, currentPath = ''): 
       return [];
     }
     
-    console.log(`[Chat] Found ${data?.length || 0} items at ${fullPath}:`, data?.map(item => `${item.name} (id: ${item.id})`));
+    console.log(`[Chat] Found ${data?.length || 0} items at ${fullPath}:`, data?.map((item: any) => `${item.name} (id: ${item.id})`));
     
     let allFiles: any[] = [];
     
@@ -2450,7 +2450,7 @@ app.get('/projects/:id/activity', authenticateUser, async (req: any, res: any) =
 
     console.log(`[DEBUG] Found ${jobs?.length || 0} jobs for project ${id}`);
     console.log('[DEBUG] Jobs with timestamps:');
-    jobs?.forEach((job, i) => {
+    jobs?.forEach((job: any, i: number) => {
       console.log(`  Job ${i}: ${job.type} - created: ${job.createdat}, updated: ${job.updatedat}`);
     });
 
@@ -3054,7 +3054,15 @@ async function generateInspectionOverlay(originalHtml: string, projectId: string
     htmlString = htmlString.replace(/href="(\/[^"_][^"]*(?<!\/_next)[^"]*\.(css|js|ico|png|jpg|jpeg|svg|woff|woff2))"/g, `href="${originalPreviewUrl}$1"`);
     htmlString = htmlString.replace(/src="(\/[^"_][^"]*(?<!\/_next)[^"]*\.(js|png|jpg|jpeg|svg|woff|woff2))"/g, `src="${originalPreviewUrl}$1"`);
     
-    console.log(`✅ [Inspection Overlay] Rewritten asset URLs using string replacement for: ${originalPreviewUrl}`);
+    // Fix WebSocket connections and dynamic imports
+    const previewBaseUrl = originalPreviewUrl.replace('http://', '').replace('https://', ''); // Get host:port
+    htmlString = htmlString.replace(/'_next\/webpack-hmr'/g, `'ws://${previewBaseUrl}/_next/webpack-hmr'`);
+    htmlString = htmlString.replace(/"_next\/webpack-hmr"/g, `"ws://${previewBaseUrl}/_next/webpack-hmr"`);
+    
+    // Fix dynamic imports and chunk loading
+    htmlString = htmlString.replace(/__webpack_require__\.p\s*=\s*["'][^"']*["']/g, `__webpack_require__.p = "${originalPreviewUrl}/"`);
+    
+    console.log(`✅ [Inspection Overlay] Rewritten asset URLs and WebSocket connections for: ${originalPreviewUrl}`);
     
     // Add inspection overlay styles and script directly to the HTML string
     const inspectionStyles = `
@@ -3127,9 +3135,34 @@ async function generateInspectionOverlay(originalHtml: string, projectId: string
   console.log('🎯 Celiador Inspection Layer Active - ' + document.querySelectorAll('[data-celiador-element]').length + ' elements ready');
 </script>`;
     
-    // Insert styles before </head> in HTML string
+    // Add base tag for proper URL resolution and insert styles before </head>
+    const baseTag = `<base href="${originalPreviewUrl}/">`;
+    const nextjsCompatScript = `
+<script>
+  // Fix Next.js runtime configuration for inspection mode
+  if (typeof window !== 'undefined') {
+    // Override fetch to use absolute URLs when needed
+    const originalFetch = window.fetch;
+    window.fetch = function(url, options) {
+      if (typeof url === 'string' && url.startsWith('/_next/')) {
+        url = '${originalPreviewUrl}' + url;
+      }
+      return originalFetch.call(this, url, options);
+    };
+    
+    // Override WebSocket constructor for HMR
+    const originalWebSocket = window.WebSocket;
+    window.WebSocket = function(url, protocols) {
+      if (typeof url === 'string' && url.includes('_next/webpack-hmr')) {
+        url = url.replace(/^ws:\/\/[^\/]+/, 'ws://${previewBaseUrl}');
+      }
+      return new originalWebSocket(url, protocols);
+    };
+  }
+</script>`;
+    
     if (htmlString.includes('</head>')) {
-      htmlString = htmlString.replace('</head>', inspectionStyles + '\n</head>');
+      htmlString = htmlString.replace('</head>', baseTag + nextjsCompatScript + inspectionStyles + '\n</head>');
     }
     
     // Insert script before </body> in HTML string  

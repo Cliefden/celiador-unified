@@ -1,5 +1,5 @@
-const OpenAI = require('openai');
-const Anthropic = require('@anthropic-ai/sdk');
+import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 
 // AI Service Configuration
 interface AIConfig {
@@ -24,8 +24,8 @@ interface AIResponse {
 }
 
 export class AIService {
-  private openai: OpenAI | null = null;
-  private anthropic: Anthropic | null = null;
+  private openai: InstanceType<typeof OpenAI> | null = null;
+  private anthropic: InstanceType<typeof Anthropic> | null = null;
 
   constructor() {
     console.log('[AI Service] Initializing with env vars...');
@@ -132,13 +132,13 @@ export class AIService {
         })),
       });
 
-      const textContent = response.content.find(c => c.type === 'text');
+      const textContent = response.content.find((c: any) => c.type === 'text');
       if (!textContent) {
         throw new Error('No text content from Anthropic');
       }
 
       return {
-        content: textContent.text,
+        content: (textContent as any).text,
         provider: 'anthropic',
         model,
         usage: response.usage ? {
