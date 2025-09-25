@@ -3065,28 +3065,52 @@ const handleProxyRequest = async (req: any, res: any) => {
       
       // Rewrite all relative URLs to go through proxy (more comprehensive)
       
-      // Rewrite _next URLs (Next.js built assets)
-      html = html.replace(/href="(\/_next\/[^"]+)"/g, `href="${proxyBasePath}$1"`);
-      html = html.replace(/src="(\/_next\/[^"]+)"/g, `src="${proxyBasePath}$1"`);
-      html = html.replace(/href='(\/_next\/[^']+)'/g, `href='${proxyBasePath}$1'`);
-      html = html.replace(/src='(\/_next\/[^']+)'/g, `src='${proxyBasePath}$1'`);
+      // Rewrite _next URLs (Next.js built assets) - avoid double proxy paths
+      html = html.replace(/href="(\/_next\/[^"]+)"/g, (match, url) => {
+        return url.includes('/projects/') ? match : `href="${proxyBasePath}${url}"`;
+      });
+      html = html.replace(/src="(\/_next\/[^"]+)"/g, (match, url) => {
+        return url.includes('/projects/') ? match : `src="${proxyBasePath}${url}"`;
+      });
+      html = html.replace(/href='(\/_next\/[^']+)'/g, (match, url) => {
+        return url.includes('/projects/') ? match : `href='${proxyBasePath}${url}'`;
+      });
+      html = html.replace(/src='(\/_next\/[^']+)'/g, (match, url) => {
+        return url.includes('/projects/') ? match : `src='${proxyBasePath}${url}'`;
+      });
       
-      // Rewrite other common asset paths that start with /
+      // Rewrite other common asset paths that start with / - avoid double proxy paths
       // CSS files
-      html = html.replace(/href="(\/[^"]+\.css[^"]*)"/g, `href="${proxyBasePath}$1"`);
-      html = html.replace(/href='(\/[^']+\.css[^']*)'/g, `href='${proxyBasePath}$1'`);
+      html = html.replace(/href="(\/[^"]+\.css[^"]*)"/g, (match, url) => {
+        return url.includes('/projects/') ? match : `href="${proxyBasePath}${url}"`;
+      });
+      html = html.replace(/href='(\/[^']+\.css[^']*)'/g, (match, url) => {
+        return url.includes('/projects/') ? match : `href='${proxyBasePath}${url}'`;
+      });
       
       // JavaScript files  
-      html = html.replace(/src="(\/[^"]+\.js[^"]*)"/g, `src="${proxyBasePath}$1"`);
-      html = html.replace(/src='(\/[^']+\.js[^']*)'/g, `src='${proxyBasePath}$1'`);
+      html = html.replace(/src="(\/[^"]+\.js[^"]*)"/g, (match, url) => {
+        return url.includes('/projects/') ? match : `src="${proxyBasePath}${url}"`;
+      });
+      html = html.replace(/src='(\/[^']+\.js[^']*)'/g, (match, url) => {
+        return url.includes('/projects/') ? match : `src='${proxyBasePath}${url}'`;
+      });
       
       // Images
-      html = html.replace(/src="(\/[^"]+\.(png|jpg|jpeg|gif|svg|webp|ico)[^"]*)"/g, `src="${proxyBasePath}$1"`);
-      html = html.replace(/src='(\/[^']+\.(png|jpg|jpeg|gif|svg|webp|ico)[^']*)'/g, `src='${proxyBasePath}$1'`);
+      html = html.replace(/src="(\/[^"]+\.(png|jpg|jpeg|gif|svg|webp|ico)[^"]*)"/g, (match, url) => {
+        return url.includes('/projects/') ? match : `src="${proxyBasePath}${url}"`;
+      });
+      html = html.replace(/src='(\/[^']+\.(png|jpg|jpeg|gif|svg|webp|ico)[^']*)'/g, (match, url) => {
+        return url.includes('/projects/') ? match : `src='${proxyBasePath}${url}'`;
+      });
       
       // Fonts and other assets
-      html = html.replace(/href="(\/[^"]+\.(woff|woff2|ttf|eot)[^"]*)"/g, `href="${proxyBasePath}$1"`);
-      html = html.replace(/href='(\/[^']+\.(woff|woff2|ttf|eot)[^']*)'/g, `href='${proxyBasePath}$1'`);
+      html = html.replace(/href="(\/[^"]+\.(woff|woff2|ttf|eot)[^"]*)"/g, (match, url) => {
+        return url.includes('/projects/') ? match : `href="${proxyBasePath}${url}"`;
+      });
+      html = html.replace(/href='(\/[^']+\.(woff|woff2|ttf|eot)[^']*)'/g, (match, url) => {
+        return url.includes('/projects/') ? match : `href='${proxyBasePath}${url}'`;
+      });
       
       console.log('✅ [Preview Proxy] Rewritten all relative URLs to use proxy paths (CSS, JS, images, fonts)');
       
