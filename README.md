@@ -12,14 +12,16 @@ A combined API and job processing service that eliminates the need for Redis/Bul
 
 ## Environment Variables
 
-Required:
+**Required for Railway deployment:**
 - `SUPABASE_URL` - Your Supabase project URL
 - `SUPABASE_SERVICE_ROLE_KEY` - Service role key for database operations
-- `NEXT_PUBLIC_SUPABASE_ANON_KEY` - Anonymous key for auth
+- `NEXT_PUBLIC_SUPABASE_URL` - Public Supabase URL (same as SUPABASE_URL)
+- `NODE_ENV=production` - Set environment mode
 
-Optional:
+**Optional:**
 - `PORT` - Server port (defaults to 8080)
-- `NODE_ENV` - Environment (production/development)
+- `OPENAI_API_KEY` - OpenAI API key for AI features
+- `ANTHROPIC_API_KEY` - Anthropic API key for Claude integration
 
 ## Endpoints
 
