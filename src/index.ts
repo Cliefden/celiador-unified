@@ -382,13 +382,28 @@ async function processGitHubRepoCreateJob(job: any) {
     // Get GitHub token from environment or integration
     const githubService = createGitHubService(process.env.GITHUB_ACCESS_TOKEN);
     
-    // Create repository
-    const repoResult = await githubService.createRepository({
-      name: job.repoName,
-      description: `Generated project: ${job.projectName}`,
-      private: false,
-      auto_init: true
-    });
+    const orgName = 'celiador-repos';
+    
+    // Check if organization exists (optional validation)
+    const orgExists = await githubService.organizationExists(orgName);
+    if (!orgExists) {
+      console.warn(`⚠️ Organization ${orgName} not found, falling back to personal account`);
+    }
+    
+    // Create repository in organization or personal account
+    const repoResult = orgExists 
+      ? await githubService.createRepositoryInOrg(orgName, {
+          name: job.repoName,
+          description: `Generated project: ${job.projectName}`,
+          private: false,
+          auto_init: true
+        })
+      : await githubService.createRepository({
+          name: job.repoName,
+          description: `Generated project: ${job.projectName}`,
+          private: false,
+          auto_init: true
+        });
 
     // Update project with GitHub repo information
     await supabaseService
@@ -1583,24 +1598,68 @@ export default function InspectionOverlay() {
     await this.cleanupLockFiles(instance.localPath, packageManager);
     
     const installCmd = packageManager === 'pnpm' ? 'pnpm' : 'npm';
-    const installArgs = packageManager === 'pnpm' ? ['install'] : ['install'];
+    
+    // Railway optimization: reduce resource usage during install
+    const isRailway = process.env.RAILWAY_ENVIRONMENT_NAME || process.env.RAILWAY_PROJECT_NAME;
+    let installArgs: string[];
+    
+    if (isRailway) {
+      console.log(`🚂 [PreviewManager] Railway environment detected - using lightweight npm install`);
+      // Use production-only install to save resources
+      installArgs = packageManager === 'pnpm' ? 
+        ['install', '--prod', '--frozen-lockfile'] : 
+        ['install', '--production', '--no-audit', '--no-fund', '--prefer-offline'];
+    } else {
+      installArgs = packageManager === 'pnpm' ? ['install'] : ['install'];
+    }
+    
+    console.log(`[PreviewManager] Running: ${installCmd} ${installArgs.join(' ')}`);
     
     const installProcess = spawn(installCmd, installArgs, {
       cwd: instance.localPath,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        NODE_ENV: 'development' // Use development mode for package installation
+        NODE_ENV: 'development', // Use development mode for package installation
+        // Railway optimizations
+        ...(isRailway && {
+          npm_config_audit: 'false',
+          npm_config_fund: 'false',
+          npm_config_optional: 'false'
+        })
       }
     });
 
     await new Promise((resolve, reject) => {
-      installProcess.on('close', (code: number) => {
+      let installOutput = '';
+      let installError = '';
+      
+      // Capture output for debugging
+      installProcess.stdout.on('data', (data: any) => {
+        installOutput += data.toString();
+        console.log(`[npm install] ${data.toString().trim()}`);
+      });
+      
+      installProcess.stderr.on('data', (data: any) => {
+        installError += data.toString();
+        console.error(`[npm install ERROR] ${data.toString().trim()}`);
+      });
+      
+      installProcess.on('close', (code: number | null) => {
+        console.log(`[PreviewManager] npm install completed with code: ${code}`);
         if (code === 0) {
           resolve(void 0);
         } else {
-          reject(new Error(`npm install failed with code ${code}`));
+          const errorMsg = `npm install failed with code ${code}. Error: ${installError}. Output: ${installOutput}`;
+          console.error(`[PreviewManager] Install failure details: ${errorMsg}`);
+          reject(new Error(errorMsg));
         }
+      });
+      
+      // Handle process termination (Railway killing it)
+      installProcess.on('error', (error: any) => {
+        console.error(`[PreviewManager] npm install process error:`, error);
+        reject(new Error(`npm install process error: ${error.message}`));
       });
     });
 
@@ -2120,7 +2179,7 @@ app.get('/projects', authenticateUser, async (req: any, res: any) => {
 
 app.post('/projects', authenticateUser, async (req: any, res: any) => {
   try {
-    const { name, templateKey, repo } = req.body;
+    const { name, templateKey, repo, createGitHubRepo } = req.body;
 
     if (!name) {
       return res.status(400).json({ error: 'Project name is required' });
@@ -2133,13 +2192,18 @@ app.post('/projects', authenticateUser, async (req: any, res: any) => {
       .replace(/^-|-$/g, '');
     
     const finalTemplateKey = templateKey || 'blank-nextjs';
+    const shouldCreateRepo = createGitHubRepo !== false; // Default to true
+    const repoOwner = repo?.owner || 'celiador-repos'; // Use organization
+    const repoName = repo?.name || defaultRepoName;
     
     const project = await db.createProject({
       name,
       templateKey: finalTemplateKey,
-      repoProvider: repo?.provider || 'github',
-      repoOwner: repo?.owner || 'user',
-      repoName: repo?.name || defaultRepoName,
+      repoProvider: shouldCreateRepo ? 'github' : null,
+      repoOwner: shouldCreateRepo ? repoOwner : null,
+      repoName: shouldCreateRepo ? repoName : null,
+      repoUrl: null, // Will be set by GitHub repo creation job
+      repoCreated: false,
       userId: req.user.id
     });
 
@@ -2173,6 +2237,34 @@ app.post('/projects', authenticateUser, async (req: any, res: any) => {
         console.log(`Scaffold job ${job.id} queued successfully`);
       } catch (scaffoldError) {
         console.error('Failed to enqueue scaffold job:', scaffoldError);
+      }
+    }
+
+    // Create GitHub repository if requested
+    if (shouldCreateRepo) {
+      try {
+        const githubJob = await db.createJob({
+          projectId: project.id,
+          userId: req.user.id,
+          type: 'GITHUB_REPO_CREATE',
+          prompt: `Create GitHub repository: ${repoOwner}/${repoName}`
+        });
+
+        const githubJobData = {
+          id: githubJob.id,
+          projectId: project.id,
+          userId: req.user.id,
+          type: 'GITHUB_REPO_CREATE',
+          repoName: repoName,
+          repoOwner: repoOwner,
+          projectName: name
+        };
+
+        // Add to in-memory queue
+        jobQueue.push(githubJobData);
+        console.log(`GitHub repo creation job ${githubJob.id} queued successfully`);
+      } catch (githubError) {
+        console.error('Failed to enqueue GitHub repo creation job:', githubError);
       }
     }
 

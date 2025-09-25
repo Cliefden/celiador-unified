@@ -29,11 +29,11 @@ class GitHubService {
   }
 
   /**
-   * Create a new GitHub repository
+   * Create a new GitHub repository (personal account)
    */
   async createRepository(repoData: GitHubRepoData): Promise<any> {
     try {
-      console.log(`Creating GitHub repo: ${repoData.name}`);
+      console.log(`Creating personal GitHub repo: ${repoData.name}`);
       
       const response = await this.octokit.rest.repos.createForAuthenticatedUser({
         name: repoData.name,
@@ -44,21 +44,53 @@ class GitHubService {
         license_template: 'mit'
       });
 
-      console.log(`✅ GitHub repo created: ${response.data.html_url}`);
-      return {
-        success: true,
-        repoUrl: response.data.html_url,
-        cloneUrl: response.data.clone_url,
-        sshUrl: response.data.ssh_url,
-        owner: response.data.owner.login,
-        name: response.data.name,
-        fullName: response.data.full_name,
-        repoId: response.data.id
-      };
+      console.log(`✅ Personal GitHub repo created: ${response.data.html_url}`);
+      return this.formatRepoResponse(response.data);
     } catch (error: any) {
-      console.error('❌ GitHub repo creation failed:', error.message);
+      console.error('❌ Personal GitHub repo creation failed:', error.message);
       throw new Error(`GitHub repo creation failed: ${error.message}`);
     }
+  }
+
+  /**
+   * Create a new GitHub repository in an organization
+   */
+  async createRepositoryInOrg(orgName: string, repoData: GitHubRepoData): Promise<any> {
+    try {
+      console.log(`Creating GitHub repo in org ${orgName}: ${repoData.name}`);
+      
+      const response = await this.octokit.rest.repos.createInOrg({
+        org: orgName,
+        name: repoData.name,
+        description: repoData.description || `Generated project: ${repoData.name}`,
+        private: repoData.private || false,
+        auto_init: repoData.auto_init || true,
+        gitignore_template: 'Node',
+        license_template: 'mit'
+      });
+
+      console.log(`✅ Organization GitHub repo created: ${response.data.html_url}`);
+      return this.formatRepoResponse(response.data);
+    } catch (error: any) {
+      console.error(`❌ Organization GitHub repo creation failed:`, error.message);
+      throw new Error(`GitHub repo creation failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Format repository response data consistently
+   */
+  private formatRepoResponse(repoData: any) {
+    return {
+      success: true,
+      repoUrl: repoData.html_url,
+      cloneUrl: repoData.clone_url,
+      sshUrl: repoData.ssh_url,
+      owner: repoData.owner.login,
+      name: repoData.name,
+      fullName: repoData.full_name,
+      repoId: repoData.id
+    };
   }
 
   /**
@@ -116,6 +148,32 @@ class GitHubService {
       return true;
     } catch (error) {
       return false;
+    }
+  }
+
+  /**
+   * Check if organization exists and user has access
+   */
+  async organizationExists(orgName: string): Promise<boolean> {
+    try {
+      await this.octokit.rest.orgs.get({ org: orgName });
+      return true;
+    } catch (error: any) {
+      console.error(`❌ Organization ${orgName} not found or no access:`, error.message);
+      return false;
+    }
+  }
+
+  /**
+   * Get organization information
+   */
+  async getOrganization(orgName: string): Promise<any> {
+    try {
+      const response = await this.octokit.rest.orgs.get({ org: orgName });
+      return response.data;
+    } catch (error: any) {
+      console.error(`❌ Failed to get organization ${orgName}:`, error.message);
+      throw new Error(`Failed to get organization: ${error.message}`);
     }
   }
 
