@@ -1477,28 +1477,61 @@ export default function InspectionOverlay() {
     const tsconfigPath = `${instance.localPath}/tsconfig.json`;
     if (fs.existsSync(tsconfigPath)) {
       console.log(`[PreviewManager] TypeScript detected, installing TypeScript dependencies for ${instance.id}`);
-      const tsInstallArgs = packageManager === 'yarn' 
-        ? ['add', '-D', 'typescript', '@types/react', '@types/node']
-        : packageManager === 'pnpm'
-        ? ['add', '-D', 'typescript', '@types/react', '@types/node'] 
-        : ['install', '--save-dev', 'typescript', '@types/react', '@types/node'];
       
-      const tsInstallProcess = spawn(installCmd, tsInstallArgs, {
-        cwd: instance.localPath,
-        stdio: ['ignore', 'pipe', 'pipe']
-      });
-
-      await new Promise((resolve, reject) => {
-        tsInstallProcess.on('close', (code: number) => {
-          if (code === 0) {
-            console.log(`[PreviewManager] TypeScript dependencies installed successfully for ${instance.id}`);
-            resolve(void 0);
-          } else {
-            console.error(`[PreviewManager] TypeScript dependency installation failed with code ${code} for ${instance.id}`);
-            reject(new Error(`TypeScript dependency installation failed with code ${code}`));
+      // Check if TypeScript is already installed
+      const packageJsonPath = `${instance.localPath}/package.json`;
+      let needsTypeScript = true;
+      if (fs.existsSync(packageJsonPath)) {
+        try {
+          const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+          const hasTypeScript = (packageJson.dependencies?.typescript || packageJson.devDependencies?.typescript);
+          const hasTypesReact = (packageJson.dependencies?.['@types/react'] || packageJson.devDependencies?.['@types/react']);
+          const hasTypesNode = (packageJson.dependencies?.['@types/node'] || packageJson.devDependencies?.['@types/node']);
+          
+          if (hasTypeScript && hasTypesReact && hasTypesNode) {
+            console.log(`[PreviewManager] TypeScript dependencies already present in package.json for ${instance.id}`);
+            needsTypeScript = false;
           }
+        } catch (e) {
+          console.error(`[PreviewManager] Error reading package.json for ${instance.id}:`, e);
+        }
+      }
+      
+      if (needsTypeScript) {
+        const tsInstallArgs = packageManager === 'yarn' 
+          ? ['add', '-D', 'typescript', '@types/react', '@types/node']
+          : packageManager === 'pnpm'
+          ? ['add', '-D', 'typescript', '@types/react', '@types/node'] 
+          : ['install', '--save-dev', 'typescript', '@types/react', '@types/node'];
+        
+        console.log(`[PreviewManager] Installing TypeScript with command: ${installCmd} ${tsInstallArgs.join(' ')}`);
+        
+        const tsInstallProcess = spawn(installCmd, tsInstallArgs, {
+          cwd: instance.localPath,
+          stdio: ['ignore', 'pipe', 'pipe']
         });
-      });
+
+        // Log installation output
+        tsInstallProcess.stdout.on('data', (data: any) => {
+          console.log(`[PreviewManager] TypeScript install output: ${data.toString().trim()}`);
+        });
+
+        tsInstallProcess.stderr.on('data', (data: any) => {
+          console.error(`[PreviewManager] TypeScript install error: ${data.toString().trim()}`);
+        });
+
+        await new Promise((resolve, reject) => {
+          tsInstallProcess.on('close', (code: number) => {
+            if (code === 0) {
+              console.log(`[PreviewManager] TypeScript dependencies installed successfully for ${instance.id}`);
+              resolve(void 0);
+            } else {
+              console.error(`[PreviewManager] TypeScript dependency installation failed with code ${code} for ${instance.id}`);
+              reject(new Error(`TypeScript dependency installation failed with code ${code}`));
+            }
+          });
+        });
+      }
     }
 
     // Start dev server
