@@ -803,9 +803,16 @@ class PreviewManager {
   }
 
   getPreview(instanceId: string): PreviewInstance | undefined {
+    console.log(`🔍 [PreviewManager] Looking for preview instance: ${instanceId}`);
+    console.log(`🔍 [PreviewManager] Total instances in memory: ${this.instances.size}`);
+    console.log(`🔍 [PreviewManager] Available instance IDs:`, Array.from(this.instances.keys()));
+    
     const instance = this.instances.get(instanceId);
     if (instance) {
+      console.log(`✅ [PreviewManager] Found instance: ${instanceId}, status: ${instance.status}`);
       instance.lastAccessed = new Date();
+    } else {
+      console.log(`❌ [PreviewManager] Instance not found: ${instanceId}`);
     }
     return instance;
   }
@@ -2765,13 +2772,23 @@ console.log('✅ [Preview Proxy] Routes registered at /projects/:id/preview/:pre
 const handleProxyRequest = async (req: any, res: any) => {
   console.log(`🔄 [Preview Proxy] Request received for project ${req.params.id}, preview ${req.params.previewId}`);
   console.log(`🔄 [Preview Proxy] Full request URL: ${req.url}`);
+  console.log(`🔄 [Preview Proxy] Request method: ${req.method}`);
+  console.log(`🔄 [Preview Proxy] Request params:`, req.params);
+  console.log(`🔄 [Preview Proxy] Query parameters:`, req.query);
+  console.log(`🔄 [Preview Proxy] Headers:`, { 
+    'user-agent': req.headers['user-agent'], 
+    'referer': req.headers['referer'],
+    'origin': req.headers['origin']
+  });
   
   // Handle authentication via query parameter for iframe requests
   const token = req.query.token;
   if (!token) {
-    console.log(`❌ [Preview Proxy] No token provided`);
+    console.log(`❌ [Preview Proxy] No token provided in query parameters`);
     return res.status(401).json({ error: 'Authentication token required' });
   }
+  
+  console.log(`🔑 [Preview Proxy] Token found, verifying authentication...`);
   
   try {
     const { data: { user }, error } = await supabase.auth.getUser(token);
