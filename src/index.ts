@@ -830,6 +830,19 @@ class PreviewManager {
     const instance = this.instances.get(instanceId);
     if (instance) {
       console.log(`✅ [PreviewManager] Found instance: ${instanceId}, status: ${instance.status}`);
+      
+      // Check if process is actually alive when status is 'running'
+      if (instance.status === 'running' && instance.process) {
+        try {
+          // Check if process is still alive (will throw if process is dead)
+          process.kill(instance.process.pid, 0);
+          console.log(`✅ [PreviewManager] Process ${instance.process.pid} is alive`);
+        } catch (error) {
+          console.log(`💀 [PreviewManager] Process ${instance.process.pid} is dead, updating status to stopped`);
+          instance.status = 'stopped';
+        }
+      }
+      
       instance.lastAccessed = new Date();
     } else {
       console.log(`❌ [PreviewManager] Instance not found: ${instanceId}`);
@@ -1636,10 +1649,16 @@ export default function InspectionOverlay() {
         clearTimeout(timeout);
         console.log(`[Preview ${instance.id}] Process exited with code: ${code}`);
         
+        // Always update status when process exits, regardless of exit code
         if (code !== 0) {
           instance.status = 'error';
           instance.errorMessage = `Dev server exited with code ${code}`;
           reject(new Error(`Dev server exited with code ${code}`));
+        } else {
+          // Normal exit - mark as stopped
+          instance.status = 'stopped';
+          console.log(`[Preview ${instance.id}] Process stopped normally (exit code 0)`);
+          console.log(`[Preview ${instance.id}] This may indicate Railway resource limits or timeout policies`);
         }
       });
 
