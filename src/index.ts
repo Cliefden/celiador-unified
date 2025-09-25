@@ -1440,7 +1440,7 @@ export default function InspectionOverlay() {
   private async startDevServer(instance: PreviewInstance, type: string): Promise<void> {
     const { spawn } = require('child_process');
     const path = require('path');
-    const fs = require('fs').promises;
+    const fs = require('fs');
 
     if (!instance.localPath) {
       throw new Error('Local path not set');
@@ -1474,7 +1474,6 @@ export default function InspectionOverlay() {
     });
 
     // Check if TypeScript is needed and install TypeScript dependencies
-    const fs = require('fs');
     const tsconfigPath = `${instance.localPath}/tsconfig.json`;
     if (fs.existsSync(tsconfigPath)) {
       console.log(`[PreviewManager] TypeScript detected, installing TypeScript dependencies for ${instance.id}`);
