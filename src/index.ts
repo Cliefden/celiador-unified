@@ -3002,9 +3002,37 @@ const handleProxyRequest = async (req: any, res: any) => {
     
     // Fetch the original preview content
     console.log(`📡 [Preview Proxy] Fetching content from: ${targetUrl}`);
-    const originalResponse = await fetch(targetUrl);
-    if (!originalResponse.ok) {
-      return res.status(originalResponse.status).json({ error: 'Failed to fetch preview content' });
+    console.log(`📡 [Preview Proxy] Preview process status:`, {
+      id: preview.id,
+      status: preview.status,
+      port: preview.port,
+      processRunning: !!preview.process && !preview.process.killed
+    });
+    
+    let originalResponse;
+    try {
+      originalResponse = await fetch(targetUrl);
+      console.log(`📡 [Preview Proxy] Fetch response:`, {
+        status: originalResponse.status,
+        statusText: originalResponse.statusText,
+        contentType: originalResponse.headers.get('content-type')
+      });
+      
+      if (!originalResponse.ok) {
+        console.log(`❌ [Preview Proxy] Fetch failed with status ${originalResponse.status}: ${originalResponse.statusText}`);
+        return res.status(originalResponse.status).json({ 
+          error: 'Failed to fetch preview content',
+          details: `${originalResponse.status} ${originalResponse.statusText}`,
+          targetUrl: targetUrl
+        });
+      }
+    } catch (fetchError) {
+      console.log(`❌ [Preview Proxy] Fetch exception:`, fetchError);
+      return res.status(500).json({ 
+        error: 'Failed to connect to preview server',
+        details: fetchError instanceof Error ? fetchError.message : String(fetchError),
+        targetUrl: targetUrl
+      });
     }
     
     const contentType = originalResponse.headers.get('content-type') || 'text/html';
