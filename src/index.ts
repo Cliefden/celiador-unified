@@ -40,9 +40,15 @@ try {
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// CORS configuration - temporarily more permissive for debugging
+// CORS configuration - allow production domains
 const corsOptions = {
-  origin: true,  // Temporarily allow all origins to debug the 502 issue
+  origin: [
+    'https://celiador.ai',
+    'https://www.celiador.ai', 
+    'http://localhost:3000',
+    'http://localhost:3001',
+    /.*\.vercel\.app$/
+  ],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
@@ -1639,24 +1645,62 @@ export default function InspectionOverlay() {
   }
 
   /**
-   * Detect which package manager to use based on lock files
+   * Check if a command is available in the system
+   */
+  private async isCommandAvailable(command: string): Promise<boolean> {
+    try {
+      const { spawn } = require('child_process');
+      return new Promise((resolve) => {
+        const process = spawn(command, ['--version'], { stdio: 'ignore' });
+        process.on('close', (code: number | null) => {
+          resolve(code === 0);
+        });
+        process.on('error', () => {
+          resolve(false);
+        });
+        // Timeout after 5 seconds
+        setTimeout(() => {
+          process.kill();
+          resolve(false);
+        }, 5000);
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Detect which package manager to use based on lock files and command availability
    */
   private async detectPackageManager(projectPath: string): Promise<'npm' | 'pnpm' | 'yarn'> {
     const path = require('path');
     
+    // Check for pnpm-lock.yaml and if pnpm is available
     try {
-      // Check for pnpm-lock.yaml first
       await fsPromises.access(path.join(projectPath, 'pnpm-lock.yaml'));
-      return 'pnpm';
+      const isPnpmAvailable = await this.isCommandAvailable('pnpm');
+      if (isPnpmAvailable) {
+        console.log(`[PreviewManager] Detected pnpm (lock file found and command available)`);
+        return 'pnpm';
+      } else {
+        console.log(`[PreviewManager] pnpm-lock.yaml found but pnpm command not available, falling back to npm`);
+      }
     } catch {}
     
+    // Check for yarn.lock and if yarn is available
     try {
-      // Check for yarn.lock
       await fsPromises.access(path.join(projectPath, 'yarn.lock'));
-      return 'yarn';
+      const isYarnAvailable = await this.isCommandAvailable('yarn');
+      if (isYarnAvailable) {
+        console.log(`[PreviewManager] Detected yarn (lock file found and command available)`);
+        return 'yarn';
+      } else {
+        console.log(`[PreviewManager] yarn.lock found but yarn command not available, falling back to npm`);
+      }
     } catch {}
     
-    // Default to npm
+    // Default to npm (should always be available in Node.js environments)
+    console.log(`[PreviewManager] Using npm as default package manager`);
     return 'npm';
   }
 
