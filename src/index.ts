@@ -2645,14 +2645,14 @@ app.post('/projects/:id/preview/start', authenticateUser, async (req: any, res: 
     });
   } catch (error) {
     console.error(`❌ [PREVIEW START] Failed to start preview for project ${req.params.id}:`, error);
-    console.error(`❌ [PREVIEW START] Error type:`, error.constructor.name);
-    console.error(`❌ [PREVIEW START] Error message:`, error.message);
-    console.error(`❌ [PREVIEW START] Error stack:`, error.stack);
+    console.error(`❌ [PREVIEW START] Error type:`, error instanceof Error ? error.constructor.name : typeof error);
+    console.error(`❌ [PREVIEW START] Error message:`, error instanceof Error ? error.message : String(error));
+    console.error(`❌ [PREVIEW START] Error stack:`, error instanceof Error ? error.stack : 'No stack trace');
     console.log(`💾 [PREVIEW START] Memory usage after error:`, process.memoryUsage());
     
     res.status(500).json({ 
       error: 'Failed to start preview', 
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined 
+      details: process.env.NODE_ENV === 'development' ? (error instanceof Error ? error.message : String(error)) : undefined 
     });
   }
 });
