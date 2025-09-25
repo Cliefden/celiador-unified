@@ -2948,35 +2948,53 @@ const handleProxyRequest = async (req: any, res: any) => {
     'origin': req.headers['origin']
   });
   
+  // Check if this is an asset request (CSS, JS, images, fonts, etc.)
+  const additionalPath = req.params[0] || '';
+  const isAssetRequest = additionalPath && (
+    additionalPath.includes('/_next/') ||
+    additionalPath.match(/\.(css|js|png|jpg|jpeg|gif|svg|webp|ico|woff|woff2|ttf|eot)(\?|$)/) ||
+    additionalPath.startsWith('static/') ||
+    additionalPath.startsWith('assets/')
+  );
+
   // Handle authentication via query parameter for iframe requests
   const token = req.query.token;
-  if (!token) {
-    console.log(`❌ [Preview Proxy] No token provided in query parameters`);
+  if (!token && !isAssetRequest) {
+    console.log(`❌ [Preview Proxy] No token provided in query parameters for non-asset request`);
     return res.status(401).json({ error: 'Authentication token required' });
   }
   
-  console.log(`🔑 [Preview Proxy] Token found, verifying authentication...`);
+  if (isAssetRequest && !token) {
+    console.log(`📦 [Preview Proxy] Asset request without token - allowing: ${additionalPath}`);
+    // For asset requests, skip authentication and proceed
+    req.user = { id: 'asset-request' };
+  }
   
-  // Check if Supabase service client is available
-  if (!supabaseService) {
-    console.log(`❌ [Preview Proxy] Supabase service not available - allowing request for development`);
-    // In development/limited mode, just proceed without authentication
-    req.user = { id: 'dev-user' };
-  } else {
-    try {
-      console.log(`🔑 [Preview Proxy] Using service client to verify token...`);
-      const { data: { user }, error } = await supabaseService.auth.getUser(token);
-      console.log(`🔑 [Preview Proxy] Auth result:`, { user: user?.id || 'none', error: error?.message || 'none' });
-      
-      if (error || !user) {
-        console.log(`❌ [Preview Proxy] Invalid token:`, error?.message || 'No user returned');
-        return res.status(401).json({ error: 'Invalid authentication token' });
+  // Skip token verification for asset requests
+  if (!isAssetRequest || token) {
+    console.log(`🔑 [Preview Proxy] Token found, verifying authentication...`);
+    
+    // Check if Supabase service client is available
+    if (!supabaseService) {
+      console.log(`❌ [Preview Proxy] Supabase service not available - allowing request for development`);
+      // In development/limited mode, just proceed without authentication
+      req.user = { id: 'dev-user' };
+    } else {
+      try {
+        console.log(`🔑 [Preview Proxy] Using service client to verify token...`);
+        const { data: { user }, error } = await supabaseService.auth.getUser(token);
+        console.log(`🔑 [Preview Proxy] Auth result:`, { user: user?.id || 'none', error: error?.message || 'none' });
+        
+        if (error || !user) {
+          console.log(`❌ [Preview Proxy] Invalid token:`, error?.message || 'No user returned');
+          return res.status(401).json({ error: 'Invalid authentication token' });
+        }
+        req.user = user;
+        console.log(`✅ [Preview Proxy] User authenticated:`, user.id);
+      } catch (error) {
+        console.log(`❌ [Preview Proxy] Authentication exception:`, error);
+        return res.status(401).json({ error: 'Authentication failed' });
       }
-      req.user = user;
-      console.log(`✅ [Preview Proxy] User authenticated:`, user.id);
-    } catch (error) {
-      console.log(`❌ [Preview Proxy] Authentication exception:`, error);
-      return res.status(401).json({ error: 'Authentication failed' });
     }
   }
   try {
@@ -3037,21 +3055,40 @@ const handleProxyRequest = async (req: any, res: any) => {
     
     const contentType = originalResponse.headers.get('content-type') || 'text/html';
     
-    // Only inject inspection script for the root HTML page (not for CSS/JS assets)
+    // Handle HTML content - always rewrite URLs, optionally inject inspection script
     const isRootRequest = !additionalPath || additionalPath === '';
-    if (contentType.includes('text/html') && enableInspection && isRootRequest) {
+    if (contentType.includes('text/html') && isRootRequest) {
       let html = await originalResponse.text();
       
-      // Rewrite relative URLs to go through the proxy
+      // Always rewrite relative URLs to go through the proxy (needed for proper asset loading)
       const proxyBasePath = `/projects/${id}/preview/${previewId}/proxy`;
       
-      // Rewrite _next URLs to go through proxy
+      // Rewrite all relative URLs to go through proxy (more comprehensive)
+      
+      // Rewrite _next URLs (Next.js built assets)
       html = html.replace(/href="(\/_next\/[^"]+)"/g, `href="${proxyBasePath}$1"`);
       html = html.replace(/src="(\/_next\/[^"]+)"/g, `src="${proxyBasePath}$1"`);
       html = html.replace(/href='(\/_next\/[^']+)'/g, `href='${proxyBasePath}$1'`);
       html = html.replace(/src='(\/_next\/[^']+)'/g, `src='${proxyBasePath}$1'`);
       
-      console.log('✅ [Preview Proxy] Rewritten relative URLs to use proxy paths');
+      // Rewrite other common asset paths that start with /
+      // CSS files
+      html = html.replace(/href="(\/[^"]+\.css[^"]*)"/g, `href="${proxyBasePath}$1"`);
+      html = html.replace(/href='(\/[^']+\.css[^']*)'/g, `href='${proxyBasePath}$1'`);
+      
+      // JavaScript files  
+      html = html.replace(/src="(\/[^"]+\.js[^"]*)"/g, `src="${proxyBasePath}$1"`);
+      html = html.replace(/src='(\/[^']+\.js[^']*)'/g, `src='${proxyBasePath}$1'`);
+      
+      // Images
+      html = html.replace(/src="(\/[^"]+\.(png|jpg|jpeg|gif|svg|webp|ico)[^"]*)"/g, `src="${proxyBasePath}$1"`);
+      html = html.replace(/src='(\/[^']+\.(png|jpg|jpeg|gif|svg|webp|ico)[^']*)'/g, `src='${proxyBasePath}$1'`);
+      
+      // Fonts and other assets
+      html = html.replace(/href="(\/[^"]+\.(woff|woff2|ttf|eot)[^"]*)"/g, `href="${proxyBasePath}$1"`);
+      html = html.replace(/href='(\/[^']+\.(woff|woff2|ttf|eot)[^']*)'/g, `href='${proxyBasePath}$1'`);
+      
+      console.log('✅ [Preview Proxy] Rewritten all relative URLs to use proxy paths (CSS, JS, images, fonts)');
       
       // Simple inspection script
       const inspectionScript = `
@@ -3119,31 +3156,16 @@ window.addEventListener('message', (event) => {
 console.log('✅ Celiador Inspection Ready');
 </script>`;
       
-      // Inject before closing </body> tag
-      if (html.includes('</body>')) {
-        html = html.replace('</body>', inspectionScript + '\n</body>');
-      } else {
-        html += inspectionScript;
+      // Conditionally inject inspection script only when requested
+      if (enableInspection) {
+        // Inject before closing </body> tag
+        if (html.includes('</body>')) {
+          html = html.replace('</body>', inspectionScript + '\n</body>');
+        } else {
+          html += inspectionScript;
+        }
+        console.log('✅ [Preview Proxy] Injected inspection script');
       }
-      
-      console.log('✅ [Preview Proxy] Injected inspection script');
-      
-      res.setHeader('Content-Type', 'text/html');
-      res.send(html);
-    } else if (contentType.includes('text/html') && isRootRequest) {
-      // HTML without inspection - still need to rewrite URLs
-      let html = await originalResponse.text();
-      
-      // Rewrite relative URLs to go through the proxy
-      const proxyBasePath = `/projects/${id}/preview/${previewId}/proxy`;
-      
-      // Rewrite _next URLs to go through proxy
-      html = html.replace(/href="(\/_next\/[^"]+)"/g, `href="${proxyBasePath}$1"`);
-      html = html.replace(/src="(\/_next\/[^"]+)"/g, `src="${proxyBasePath}$1"`);
-      html = html.replace(/href='(\/_next\/[^']+)'/g, `href='${proxyBasePath}$1'`);
-      html = html.replace(/src='(\/_next\/[^']+)'/g, `src='${proxyBasePath}$1'`);
-      
-      console.log('✅ [Preview Proxy] Rewritten URLs for HTML without inspection');
       
       res.setHeader('Content-Type', 'text/html');
       res.send(html);
