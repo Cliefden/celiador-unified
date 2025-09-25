@@ -5,6 +5,7 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const { JSDOM } = require('jsdom');
 const { aiService } = require('./ai-service');
+const { createGitHubService } = require('./github-service');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
 
@@ -98,6 +99,8 @@ const db = {
         repoprovider: projectData.repoProvider || 'github',
         repoowner: projectData.repoOwner,
         reponame: projectData.repoName,
+        repo_url: projectData.repoUrl,
+        repo_created: projectData.repoCreated || false,
         userid: projectData.userId,
         status: 'READY'
       })
@@ -323,6 +326,12 @@ async function processJob(job: any) {
       case 'CODEGEN':
         result = await processCodegenJob(job);
         break;
+      case 'GITHUB_REPO_CREATE':
+        result = await processGitHubRepoCreateJob(job);
+        break;
+      case 'COMMIT':
+        result = await processCommitJob(job);
+        break;
       default:
         result = { message: `Job type ${job.type} processed successfully` };
     }
@@ -363,6 +372,95 @@ async function processCodegenJob(job: any) {
     message: `Code generated for: ${job.prompt}`,
     timestamp: new Date().toISOString()
   };
+}
+
+// GitHub repo creation job processor
+async function processGitHubRepoCreateJob(job: any) {
+  console.log(`Creating GitHub repository: ${job.repoName} for project ${job.projectId}`);
+  
+  try {
+    // Get GitHub token from environment or integration
+    const githubService = createGitHubService(process.env.GITHUB_ACCESS_TOKEN);
+    
+    // Create repository
+    const repoResult = await githubService.createRepository({
+      name: job.repoName,
+      description: `Generated project: ${job.projectName}`,
+      private: false,
+      auto_init: true
+    });
+
+    // Update project with GitHub repo information
+    await supabaseService
+      .from('projects')
+      .update({
+        repo_url: repoResult.repoUrl,
+        repo_created: true
+      })
+      .eq('id', job.projectId);
+
+    console.log(`✅ GitHub repo created and project updated: ${repoResult.repoUrl}`);
+
+    return {
+      success: true,
+      repoUrl: repoResult.repoUrl,
+      repoOwner: repoResult.owner,
+      repoName: repoResult.name,
+      message: `GitHub repository created successfully: ${repoResult.repoUrl}`,
+      timestamp: new Date().toISOString()
+    };
+  } catch (error: any) {
+    console.error(`❌ GitHub repo creation failed:`, error.message);
+    throw error;
+  }
+}
+
+// Commit job processor
+async function processCommitJob(job: any) {
+  console.log(`Creating commit for project ${job.projectId}: ${job.commit_message}`);
+  
+  try {
+    // Get project details to get repo information
+    const project = await db.getProjectById(job.projectId);
+    if (!project || !project.repo_url) {
+      throw new Error('Project not found or GitHub repository not created');
+    }
+
+    const githubService = createGitHubService(process.env.GITHUB_ACCESS_TOKEN);
+    
+    // For now, create a simple commit with a README update
+    // In production, this would handle actual project files
+    const commitResult = await githubService.createInitialCommit({
+      owner: project.repoowner,
+      repo: project.reponame,
+      path: 'README.md',
+      message: job.commit_message || 'Update project files',
+      content: `# ${project.name}\n\nGenerated project using Celiador.\n\nLast updated: ${new Date().toISOString()}`
+    });
+
+    // Update job with commit information
+    await supabaseService
+      .from('jobs')
+      .update({
+        commit_hash: commitResult.commitSha,
+        commit_message: job.commit_message || 'Update project files',
+        branch_name: 'main'
+      })
+      .eq('id', job.id);
+
+    console.log(`✅ Commit created: ${commitResult.commitSha}`);
+
+    return {
+      success: true,
+      commitHash: commitResult.commitSha,
+      commitUrl: commitResult.commitUrl,
+      message: `Commit created successfully: ${commitResult.commitSha}`,
+      timestamp: new Date().toISOString()
+    };
+  } catch (error: any) {
+    console.error(`❌ Commit creation failed:`, error.message);
+    throw error;
+  }
 }
 
 // Job queue processor (runs in background)
