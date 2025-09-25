@@ -1476,7 +1476,11 @@ export default function InspectionOverlay() {
     
     const installProcess = spawn(installCmd, installArgs, {
       cwd: instance.localPath,
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        NODE_ENV: 'development' // Use development mode for package installation
+      }
     });
 
     await new Promise((resolve, reject) => {
@@ -1549,7 +1553,11 @@ export default function InspectionOverlay() {
         
         const tsInstallProcess = spawn(installCmd, tsInstallArgs, {
           cwd: instance.localPath,
-          stdio: ['ignore', 'pipe', 'pipe']
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: {
+            ...process.env,
+            NODE_ENV: 'development' // Use development mode for TypeScript installation
+          }
         });
 
         // Log installation output
