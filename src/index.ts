@@ -5,6 +5,8 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const { JSDOM } = require('jsdom');
 const { aiService } = require('./ai-service');
+const fs = require('fs');
+const fsPromises = require('fs').promises;
 
 const app = express();
 const port = parseInt(process.env.PORT || '8080', 10);
@@ -717,12 +719,24 @@ class PreviewManager {
     const port = await this.portManager.allocatePort();
     
     // Construct the proxy URL for Railway deployment
-    const baseUrl = process.env.NODE_ENV === 'production' 
+    let baseUrl = process.env.NODE_ENV === 'production' 
       ? (process.env.RAILWAY_PUBLIC_DOMAIN || 'https://celiador-unified-production.up.railway.app')
       : 'http://localhost:' + (process.env.PORT || '4000');
     
+    // Ensure production URLs always have https:// protocol
+    if (process.env.NODE_ENV === 'production' && !baseUrl.startsWith('http')) {
+      baseUrl = `https://${baseUrl}`;
+    }
+    
     const proxyUrl = `${baseUrl}/projects/${projectId}/preview/${instanceId}/proxy/`;
     const internalUrl = `http://localhost:${port}`; // Keep internal URL for server-side fetching
+    
+    console.log(`[PreviewManager] URL construction:`, {
+      NODE_ENV: process.env.NODE_ENV,
+      RAILWAY_PUBLIC_DOMAIN: process.env.RAILWAY_PUBLIC_DOMAIN,
+      baseUrl,
+      proxyUrl
+    });
     
     const instance: PreviewInstance = {
       id: instanceId,
@@ -828,14 +842,13 @@ class PreviewManager {
   }
 
   private async syncProjectFiles(projectId: string, localPath: string): Promise<SyncResult> {
-    const fs = require('fs').promises;
     const path = require('path');
     const errors: string[] = [];
     let filesDownloaded = 0;
     
     try {
       // Ensure directory exists
-      await fs.mkdir(localPath, { recursive: true });
+      await fsPromises.mkdir(localPath, { recursive: true });
       
       if (!supabaseService) {
         console.log(`[PreviewManager] No Supabase service available, creating basic structure`);
@@ -900,11 +913,11 @@ class PreviewManager {
               const dir = path.dirname(localFilePath);
               
               // Ensure directory exists
-              await fs.mkdir(dir, { recursive: true });
+              await fsPromises.mkdir(dir, { recursive: true });
               
               // Write file
               const content = await fileData.text();
-              await fs.writeFile(localFilePath, content);
+              await fsPromises.writeFile(localFilePath, content);
               filesDownloaded++;
               console.log(`[PreviewManager] Downloaded: ${filePath} (${content.length} chars)`);
             } else {
@@ -996,7 +1009,6 @@ class PreviewManager {
   }
 
   private async createBasicNextjsStructure(localPath: string, projectId: string): Promise<void> {
-    const fs = require('fs').promises;
     const path = require('path');
 
     // Create package.json
@@ -1016,13 +1028,13 @@ class PreviewManager {
       }
     };
 
-    await fs.writeFile(
+    await fsPromises.writeFile(
       path.join(localPath, 'package.json'),
       JSON.stringify(packageJson, null, 2)
     );
 
     // Create src/app structure
-    await fs.mkdir(path.join(localPath, 'src', 'app'), { recursive: true });
+    await fsPromises.mkdir(path.join(localPath, 'src', 'app'), { recursive: true });
 
     // Create inspection overlay component
     const inspectionOverlayContent = `'use client';
@@ -1179,7 +1191,7 @@ export default function InspectionOverlay() {
   );
 }`;
 
-    await fs.writeFile(path.join(localPath, 'src', 'app', 'InspectionOverlay.tsx'), inspectionOverlayContent);
+    await fsPromises.writeFile(path.join(localPath, 'src', 'app', 'InspectionOverlay.tsx'), inspectionOverlayContent);
 
     // Create layout.tsx with inspection support
     const layoutContent = `import InspectionOverlay from './InspectionOverlay';
@@ -1199,7 +1211,7 @@ export default function RootLayout({
   );
 }`;
 
-    await fs.writeFile(path.join(localPath, 'src', 'app', 'layout.tsx'), layoutContent);
+    await fsPromises.writeFile(path.join(localPath, 'src', 'app', 'layout.tsx'), layoutContent);
 
     // Create page.tsx with interactive elements
     const pageContent = `'use client';
@@ -1221,7 +1233,7 @@ export default function Home() {
   );
 }`;
 
-    await fs.writeFile(path.join(localPath, 'src', 'app', 'page.tsx'), pageContent);
+    await fsPromises.writeFile(path.join(localPath, 'src', 'app', 'page.tsx'), pageContent);
 
     // Create next.config.js
     const nextConfig = `/** @type {import('next').NextConfig} */
@@ -1231,11 +1243,10 @@ const nextConfig = {
 
 module.exports = nextConfig`;
 
-    await fs.writeFile(path.join(localPath, 'next.config.js'), nextConfig);
+    await fsPromises.writeFile(path.join(localPath, 'next.config.js'), nextConfig);
   }
 
   private async ensureInspectionOverlay(localPath: string): Promise<void> {
-    const fs = require('fs').promises;
     const path = require('path');
     
     // Create InspectionOverlay.tsx in the app directory
@@ -1395,8 +1406,8 @@ export default function InspectionOverlay() {
 }`;
 
     try {
-      await fs.mkdir(path.join(localPath, 'app'), { recursive: true });
-      await fs.writeFile(inspectionOverlayPath, inspectionOverlayContent);
+      await fsPromises.mkdir(path.join(localPath, 'app'), { recursive: true });
+      await fsPromises.writeFile(inspectionOverlayPath, inspectionOverlayContent);
       console.log(`[PreviewManager] Created InspectionOverlay.tsx`);
     } catch (error) {
       console.warn(`[PreviewManager] Failed to create InspectionOverlay.tsx:`, error);
@@ -1440,7 +1451,6 @@ export default function InspectionOverlay() {
   private async startDevServer(instance: PreviewInstance, type: string): Promise<void> {
     const { spawn } = require('child_process');
     const path = require('path');
-    const fs = require('fs');
 
     if (!instance.localPath) {
       throw new Error('Local path not set');
@@ -1632,18 +1642,17 @@ export default function InspectionOverlay() {
    * Detect which package manager to use based on lock files
    */
   private async detectPackageManager(projectPath: string): Promise<'npm' | 'pnpm' | 'yarn'> {
-    const fs = require('fs').promises;
     const path = require('path');
     
     try {
       // Check for pnpm-lock.yaml first
-      await fs.access(path.join(projectPath, 'pnpm-lock.yaml'));
+      await fsPromises.access(path.join(projectPath, 'pnpm-lock.yaml'));
       return 'pnpm';
     } catch {}
     
     try {
       // Check for yarn.lock
-      await fs.access(path.join(projectPath, 'yarn.lock'));
+      await fsPromises.access(path.join(projectPath, 'yarn.lock'));
       return 'yarn';
     } catch {}
     
@@ -1655,53 +1664,52 @@ export default function InspectionOverlay() {
    * Clean up conflicting lock files
    */
   private async cleanupLockFiles(projectPath: string, packageManager: 'npm' | 'pnpm' | 'yarn'): Promise<void> {
-    const fs = require('fs').promises;
     const path = require('path');
     
     try {
       if (packageManager === 'pnpm') {
         // Remove npm and yarn lock files if using pnpm
         try {
-          await fs.unlink(path.join(projectPath, 'package-lock.json'));
+          await fsPromises.unlink(path.join(projectPath, 'package-lock.json'));
           console.log(`[PreviewManager] Removed conflicting package-lock.json`);
         } catch {}
         try {
-          await fs.unlink(path.join(projectPath, 'yarn.lock'));
+          await fsPromises.unlink(path.join(projectPath, 'yarn.lock'));
           console.log(`[PreviewManager] Removed conflicting yarn.lock`);
         } catch {}
         // Also remove node_modules to start fresh
         try {
-          await fs.rm(path.join(projectPath, 'node_modules'), { recursive: true, force: true });
+          await fsPromises.rm(path.join(projectPath, 'node_modules'), { recursive: true, force: true });
           console.log(`[PreviewManager] Removed existing node_modules`);
         } catch {}
       } else if (packageManager === 'yarn') {
         // Remove npm and pnpm lock files if using yarn
         try {
-          await fs.unlink(path.join(projectPath, 'package-lock.json'));
+          await fsPromises.unlink(path.join(projectPath, 'package-lock.json'));
           console.log(`[PreviewManager] Removed conflicting package-lock.json`);
         } catch {}
         try {
-          await fs.unlink(path.join(projectPath, 'pnpm-lock.yaml'));
+          await fsPromises.unlink(path.join(projectPath, 'pnpm-lock.yaml'));
           console.log(`[PreviewManager] Removed conflicting pnpm-lock.yaml`);
         } catch {}
         // Also remove node_modules to start fresh
         try {
-          await fs.rm(path.join(projectPath, 'node_modules'), { recursive: true, force: true });
+          await fsPromises.rm(path.join(projectPath, 'node_modules'), { recursive: true, force: true });
           console.log(`[PreviewManager] Removed existing node_modules`);
         } catch {}
       } else {
         // Using npm - remove other lock files
         try {
-          await fs.unlink(path.join(projectPath, 'pnpm-lock.yaml'));
+          await fsPromises.unlink(path.join(projectPath, 'pnpm-lock.yaml'));
           console.log(`[PreviewManager] Removed conflicting pnpm-lock.yaml`);
         } catch {}
         try {
-          await fs.unlink(path.join(projectPath, 'yarn.lock'));
+          await fsPromises.unlink(path.join(projectPath, 'yarn.lock'));
           console.log(`[PreviewManager] Removed conflicting yarn.lock`);
         } catch {}
         // Also remove node_modules to start fresh
         try {
-          await fs.rm(path.join(projectPath, 'node_modules'), { recursive: true, force: true });
+          await fsPromises.rm(path.join(projectPath, 'node_modules'), { recursive: true, force: true });
           console.log(`[PreviewManager] Removed existing node_modules`);
         } catch {}
       }
