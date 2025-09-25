@@ -1475,7 +1475,32 @@ export default function InspectionOverlay() {
 
     // Check if TypeScript is needed and install TypeScript dependencies
     const tsconfigPath = `${instance.localPath}/tsconfig.json`;
-    if (fs.existsSync(tsconfigPath)) {
+    
+    // Check for TypeScript files or tsconfig.json
+    let hasTypeScriptFiles = false;
+    try {
+      const files = fs.readdirSync(instance.localPath, { recursive: true });
+      hasTypeScriptFiles = Array.isArray(files) && files.some((file: string) => 
+        typeof file === 'string' && (file.endsWith('.ts') || file.endsWith('.tsx'))
+      );
+    } catch (e) {
+      console.error(`[PreviewManager] Error scanning for TypeScript files: ${e}`);
+    }
+    
+    const hasTsConfig = fs.existsSync(tsconfigPath);
+    const needsTypeScript = hasTsConfig || hasTypeScriptFiles;
+    
+    console.log(`[PreviewManager] TypeScript analysis for ${instance.id}:`);
+    console.log(`  - tsconfig.json exists: ${hasTsConfig}`);
+    console.log(`  - TypeScript files found: ${hasTypeScriptFiles}`);
+    console.log(`  - Needs TypeScript: ${needsTypeScript}`);
+    
+    // For Next.js projects, always install TypeScript dependencies as a safeguard
+    // since Next.js may auto-generate tsconfig.json and require TypeScript
+    const alwaysInstallTypeScript = type === 'nextjs';
+    console.log(`  - Force install for Next.js: ${alwaysInstallTypeScript}`);
+    
+    if (needsTypeScript || alwaysInstallTypeScript) {
       console.log(`[PreviewManager] TypeScript detected, installing TypeScript dependencies for ${instance.id}`);
       
       // Check if TypeScript is already installed
