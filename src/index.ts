@@ -1604,11 +1604,11 @@ export default function InspectionOverlay() {
     let installArgs: string[];
     
     if (isRailway) {
-      console.log(`🚂 [PreviewManager] Railway environment detected - using lightweight npm install`);
-      // Use production-only install to save resources
+      console.log(`🚂 [PreviewManager] Railway environment detected - using optimized npm install`);
+      // Use regular install but with optimizations to reduce resource usage
       installArgs = packageManager === 'pnpm' ? 
-        ['install', '--prod', '--frozen-lockfile'] : 
-        ['install', '--production', '--no-audit', '--no-fund', '--prefer-offline'];
+        ['install', '--prefer-offline'] : 
+        ['install', '--no-audit', '--no-fund', '--prefer-offline'];
     } else {
       installArgs = packageManager === 'pnpm' ? ['install'] : ['install'];
     }
