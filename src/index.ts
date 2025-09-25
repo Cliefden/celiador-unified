@@ -38,28 +38,26 @@ try {
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// CORS configuration  
+// CORS configuration - temporarily more permissive for debugging
 const corsOptions = {
-  origin: process.env.CORS_DEBUG === 'true' 
-    ? true  // Allow all origins for debugging
-    : process.env.NODE_ENV === 'production' 
-      ? [
-          'https://celiador-web.vercel.app', 
-          'https://celiador.ai', 
-          'https://www.celiador.ai',
-          'https://celiador-web-git-main-cliefdens-projects.vercel.app',
-          'https://celiador-web.up.railway.app'
-        ]
-      : ['http://localhost:3000', 'http://localhost:3001'],
+  origin: true,  // Temporarily allow all origins to debug the 502 issue
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
   optionsSuccessStatus: 200
 };
-// Add CORS logging middleware
+// Add CORS and request logging middleware
 app.use((req: any, res: any, next: any) => {
   const origin = req.headers.origin;
-  console.log(`🌐 [CORS] Request from origin: ${origin || 'no origin'} - ${req.method} ${req.path}`);
+  console.log(`🌐 [REQUEST] ${req.method} ${req.path} from origin: ${origin || 'no origin'}`);
+  
+  // Add error handling for better debugging
+  res.on('finish', () => {
+    if (res.statusCode >= 400) {
+      console.log(`❌ [ERROR] ${req.method} ${req.path} - Status: ${res.statusCode}`);
+    }
+  });
+  
   next();
 });
 
