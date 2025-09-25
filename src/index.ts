@@ -38,15 +38,31 @@ try {
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// CORS configuration
+// CORS configuration  
 const corsOptions = {
-  origin: process.env.NODE_ENV === 'production' 
-    ? ['https://celiador-web.vercel.app', 'https://celiador.ai', 'https://www.celiador.ai']
-    : ['http://localhost:3000', 'http://localhost:3001'],
+  origin: process.env.CORS_DEBUG === 'true' 
+    ? true  // Allow all origins for debugging
+    : process.env.NODE_ENV === 'production' 
+      ? [
+          'https://celiador-web.vercel.app', 
+          'https://celiador.ai', 
+          'https://www.celiador.ai',
+          'https://celiador-web-git-main-cliefdens-projects.vercel.app',
+          'https://celiador-web.up.railway.app'
+        ]
+      : ['http://localhost:3000', 'http://localhost:3001'],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
+  optionsSuccessStatus: 200
 };
+// Add CORS logging middleware
+app.use((req: any, res: any, next: any) => {
+  const origin = req.headers.origin;
+  console.log(`🌐 [CORS] Request from origin: ${origin || 'no origin'} - ${req.method} ${req.path}`);
+  next();
+});
+
 app.use(cors(corsOptions));
 
 // Database helpers
@@ -3769,6 +3785,8 @@ const server = app.listen(port, '0.0.0.0', () => {
   console.log('=== SERVER STARTED SUCCESSFULLY ===');
   console.log(`🚀 Server running on port ${port}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🔒 CORS Debug: ${process.env.CORS_DEBUG || 'false'}`);
+  console.log(`🌐 CORS Origins: ${JSON.stringify(corsOptions.origin)}`);
   console.log(`💾 Database: ${supabaseService ? 'CONNECTED' : 'DISCONNECTED'}`);
   console.log(`⚡ Job Processing: ENABLED`);
   console.log('✅ Health endpoints: /, /health, /healthz');
