@@ -1605,6 +1605,21 @@ export default function InspectionOverlay() {
     
     if (isRailway) {
       console.log(`🚂 [PreviewManager] Railway environment detected - using optimized npm install`);
+      
+      // Remove existing lock file to prevent sync issues with templates
+      const lockFilePath = packageManager === 'pnpm' ? 
+        path.join(projectPath, 'pnpm-lock.yaml') : 
+        path.join(projectPath, 'package-lock.json');
+      
+      try {
+        if (fs.existsSync(lockFilePath)) {
+          console.log(`🗑️ [PreviewManager] Removing outdated lock file: ${lockFilePath}`);
+          fs.unlinkSync(lockFilePath);
+        }
+      } catch (error) {
+        console.warn(`⚠️ [PreviewManager] Could not remove lock file:`, error);
+      }
+      
       // Use regular install but with optimizations to reduce resource usage
       installArgs = packageManager === 'pnpm' ? 
         ['install', '--prefer-offline'] : 
