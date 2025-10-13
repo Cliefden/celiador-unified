@@ -6,6 +6,7 @@ const { createClient } = require('@supabase/supabase-js');
 const { JSDOM } = require('jsdom');
 const { aiService } = require('./ai-service');
 const { createGitHubService } = require('./github-service');
+const { createVercelService } = require('./vercel-service');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
 
@@ -332,6 +333,18 @@ async function processJob(job: any) {
       case 'COMMIT':
         result = await processCommitJob(job);
         break;
+      case 'FILE_CREATE':
+        result = await processFileCreateJob(job);
+        break;
+      case 'FILE_UPDATE':
+        result = await processFileUpdateJob(job);
+        break;
+      case 'FILE_DELETE':
+        result = await processFileDeleteJob(job);
+        break;
+      case 'FILE_BATCH':
+        result = await processFileBatchJob(job);
+        break;
       default:
         result = { message: `Job type ${job.type} processed successfully` };
     }
@@ -474,6 +487,218 @@ async function processCommitJob(job: any) {
     };
   } catch (error: any) {
     console.error(`❌ Commit creation failed:`, error.message);
+    throw error;
+  }
+}
+
+// Import backup service
+const BackupService = require('./backup-service').default;
+const backupService = supabaseService ? new BackupService(supabaseService) : null;
+
+// File operation job processors
+async function processFileCreateJob(job: any) {
+  console.log(`Creating file: ${job.filePath} for project ${job.projectId}`);
+  
+  try {
+    if (!supabaseService) {
+      throw new Error('Storage service not available');
+    }
+
+    const storagePath = `${job.userId}/${job.projectId}/${job.filePath}`;
+    
+    // Save to Supabase Storage
+    const { data, error } = await supabaseService.storage
+      .from('project-files')
+      .upload(storagePath, job.content || '', {
+        contentType: getFileContentType(job.filePath),
+        upsert: false // Don't overwrite existing files
+      });
+
+    if (error) {
+      throw new Error(`Storage error: ${error.message}`);
+    }
+
+    return {
+      success: true,
+      filePath: job.filePath,
+      size: job.content?.length || 0,
+      storageKey: data.path,
+      message: `File ${job.filePath} created successfully`,
+      timestamp: new Date().toISOString()
+    };
+  } catch (error: any) {
+    console.error(`❌ File creation failed:`, error.message);
+    throw error;
+  }
+}
+
+async function processFileUpdateJob(job: any) {
+  console.log(`Updating file: ${job.filePath} for project ${job.projectId}`);
+  
+  try {
+    if (!supabaseService) {
+      throw new Error('Storage service not available');
+    }
+
+    const storagePath = `${job.userId}/${job.projectId}/${job.filePath}`;
+    
+    // Create backup before updating
+    if (backupService) {
+      try {
+        const originalContent = await backupService.getFileContentForBackup(
+          job.userId,
+          job.projectId,
+          job.filePath
+        );
+        
+        const backupId = await backupService.createBackup(
+          job.userId,
+          job.projectId,
+          job.filePath,
+          originalContent,
+          'update',
+          job.id
+        );
+        
+        console.log(`✅ Backup created: ${backupId} for file update`);
+      } catch (backupError) {
+        console.warn(`⚠️ Failed to create backup for ${job.filePath}:`, backupError);
+        // Continue with update even if backup fails
+      }
+    }
+    
+    // Update file in Supabase Storage
+    const { data, error } = await supabaseService.storage
+      .from('project-files')
+      .upload(storagePath, job.content || '', {
+        contentType: getFileContentType(job.filePath),
+        upsert: true // Overwrite existing file
+      });
+
+    if (error) {
+      throw new Error(`Storage error: ${error.message}`);
+    }
+
+    return {
+      success: true,
+      filePath: job.filePath,
+      size: job.content?.length || 0,
+      storageKey: data.path,
+      message: `File ${job.filePath} updated successfully`,
+      timestamp: new Date().toISOString()
+    };
+  } catch (error: any) {
+    console.error(`❌ File update failed:`, error.message);
+    throw error;
+  }
+}
+
+async function processFileDeleteJob(job: any) {
+  console.log(`Deleting file: ${job.filePath} for project ${job.projectId}`);
+  
+  try {
+    if (!supabaseService) {
+      throw new Error('Storage service not available');
+    }
+
+    const storagePath = `${job.userId}/${job.projectId}/${job.filePath}`;
+    
+    // Create backup before deleting
+    if (backupService) {
+      try {
+        const originalContent = await backupService.getFileContentForBackup(
+          job.userId,
+          job.projectId,
+          job.filePath
+        );
+        
+        const backupId = await backupService.createBackup(
+          job.userId,
+          job.projectId,
+          job.filePath,
+          originalContent,
+          'delete',
+          job.id
+        );
+        
+        console.log(`✅ Backup created: ${backupId} for file deletion`);
+      } catch (backupError) {
+        console.warn(`⚠️ Failed to create backup for ${job.filePath}:`, backupError);
+        // Continue with deletion even if backup fails
+      }
+    }
+    
+    // Delete file from Supabase Storage
+    const { error } = await supabaseService.storage
+      .from('project-files')
+      .remove([storagePath]);
+
+    if (error) {
+      throw new Error(`Storage error: ${error.message}`);
+    }
+
+    return {
+      success: true,
+      filePath: job.filePath,
+      message: `File ${job.filePath} deleted successfully`,
+      timestamp: new Date().toISOString()
+    };
+  } catch (error: any) {
+    console.error(`❌ File deletion failed:`, error.message);
+    throw error;
+  }
+}
+
+async function processFileBatchJob(job: any) {
+  console.log(`Processing batch file operations for project ${job.projectId}`);
+  
+  try {
+    const results = [];
+    
+    for (const operation of job.operations) {
+      let result;
+      
+      switch (operation.type) {
+        case 'create_file':
+          result = await processFileCreateJob({
+            ...job,
+            filePath: operation.path,
+            content: operation.content
+          });
+          break;
+        case 'update_file':
+          result = await processFileUpdateJob({
+            ...job,
+            filePath: operation.path,
+            content: operation.content
+          });
+          break;
+        case 'delete_file':
+          result = await processFileDeleteJob({
+            ...job,
+            filePath: operation.path
+          });
+          break;
+        default:
+          throw new Error(`Unknown operation type: ${operation.type}`);
+      }
+      
+      results.push({
+        operation: operation.type,
+        path: operation.path,
+        result
+      });
+    }
+
+    return {
+      success: true,
+      operations: results.length,
+      results,
+      message: `Batch file operations completed (${results.length} operations)`,
+      timestamp: new Date().toISOString()
+    };
+  } catch (error: any) {
+    console.error(`❌ Batch file operations failed:`, error.message);
     throw error;
   }
 }
@@ -2426,6 +2651,53 @@ app.post('/projects/:id/jobs', authenticateUser, async (req: any, res: any) => {
   }
 });
 
+// Get individual job status
+app.get('/jobs/:id', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    
+    if (!supabaseService) {
+      return res.status(500).json({ error: 'Database not available' });
+    }
+    
+    // Get job from database
+    const { data: job, error } = await supabaseService
+      .from('jobs')
+      .select('*')
+      .eq('id', id)
+      .eq('userid', req.user.id) // Ensure user can only access their own jobs
+      .single();
+
+    if (error) {
+      console.error('Database error fetching job:', error);
+      return res.status(500).json({ error: 'Failed to fetch job' });
+    }
+
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    // Transform database record to match frontend interface
+    const transformedJob = {
+      id: job.id,
+      userId: job.userid,
+      projectId: job.projectid,
+      type: job.type,
+      status: job.status,
+      metadata: job.metadata,
+      result: job.result,
+      error: job.error,
+      createdAt: job.createdat,
+      updatedAt: job.updatedat
+    };
+
+    res.json(transformedJob);
+  } catch (error) {
+    console.error('Failed to fetch job:', error);
+    res.status(500).json({ error: 'Failed to fetch job' });
+  }
+});
+
 app.post('/jobs/:id/cancel', authenticateUser, async (req: any, res: any) => {
   try {
     const { id } = req.params;
@@ -2586,15 +2858,83 @@ app.post('/projects/:id/chat', authenticateUser, async (req: any, res: any) => {
     // Parse actions from response
     const parsedActions = aiService.parseActionsFromResponse(aiResult.content);
     
+    let jobId = null;
+    
+    // Create file operation jobs if actions are detected
+    if (parsedActions.hasActions && parsedActions.actions.length > 0) {
+      console.log(`[Chat] Creating jobs for ${parsedActions.actions.length} file operations`);
+      
+      if (parsedActions.actions.length === 1) {
+        // Single file operation
+        const action = parsedActions.actions[0];
+        // Map AI action type to job type
+        const jobType = action.type === 'create_file' ? 'FILE_CREATE' :
+                       action.type === 'update_file' ? 'FILE_UPDATE' :
+                       action.type === 'delete_file' ? 'FILE_DELETE' : 'FILE_UPDATE';
+        
+        const job = await db.createJob({
+          userId: req.user.id,
+          projectId,
+          type: jobType,
+          status: 'PENDING',
+          metadata: {
+            filePath: action.path,
+            content: action.content,
+            actionType: action.type,
+            conversationId
+          }
+        });
+        
+        const jobData = {
+          ...job,
+          userId: req.user.id,
+          projectId,
+          filePath: action.path,
+          content: action.content
+        };
+        
+        jobQueue.push(jobData);
+        jobId = job.id;
+        console.log(`[Chat] Single file operation job ${job.id} created and queued`);
+        
+      } else {
+        // Batch file operations
+        const job = await db.createJob({
+          userId: req.user.id,
+          projectId,
+          type: 'FILE_BATCH',
+          status: 'PENDING',
+          metadata: {
+            operations: parsedActions.actions,
+            conversationId
+          }
+        });
+        
+        const jobData = {
+          ...job,
+          userId: req.user.id,
+          projectId,
+          operations: parsedActions.actions
+        };
+        
+        jobQueue.push(jobData);
+        jobId = job.id;
+        console.log(`[Chat] Batch file operation job ${job.id} created and queued with ${parsedActions.actions.length} operations`);
+      }
+    }
+    
     const aiResponse = {
       response: aiResult.content,
-      actions: parsedActions.hasActions ? parsedActions.actions : null,
+      actions: parsedActions.hasActions ? {
+        detected: parsedActions.actions,
+        jobId
+      } : null,
       conversationId,
       timestamp: new Date().toISOString(),
       usage: aiResult.usage
     };
     
-    console.log(`[Chat] AI response generated: ${aiResult.content.length} chars, ${parsedActions.actions.length} actions`);
+    console.log(`[Chat] AI response generated: ${aiResult.content.length} chars, ${parsedActions.actions.length} actions, job: ${jobId}`);
     res.json(aiResponse);
     
   } catch (error: any) {
@@ -2603,6 +2943,80 @@ app.post('/projects/:id/chat', authenticateUser, async (req: any, res: any) => {
       error: 'Failed to process chat message',
       details: error.message 
     });
+  }
+});
+
+// Backup management endpoints
+app.get('/projects/:id/backups', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id: projectId } = req.params;
+    const { limit = 50 } = req.query;
+    
+    if (!backupService) {
+      return res.status(500).json({ error: 'Backup service not available' });
+    }
+    
+    const backups = await backupService.getBackupHistory(
+      projectId,
+      req.user.id,
+      parseInt(limit)
+    );
+    
+    res.json({ backups });
+  } catch (error: any) {
+    console.error('Failed to fetch backup history:', error);
+    res.status(500).json({ error: 'Failed to fetch backup history' });
+  }
+});
+
+app.post('/backups/:id/restore', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id: backupId } = req.params;
+    
+    if (!backupService) {
+      return res.status(500).json({ error: 'Backup service not available' });
+    }
+    
+    const result = await backupService.restoreFromBackup(backupId, req.user.id);
+    
+    // Trigger file refresh for the restored file
+    // (This would normally be done through WebSocket or similar mechanism)
+    
+    res.json({ 
+      success: true,
+      message: `File ${result.filePath} restored successfully`,
+      filePath: result.filePath,
+      projectId: result.projectId
+    });
+  } catch (error: any) {
+    console.error('Failed to restore backup:', error);
+    res.status(500).json({ error: error.message || 'Failed to restore backup' });
+  }
+});
+
+app.post('/projects/:id/backups/cleanup', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id: projectId } = req.params;
+    const { keepCount = 10 } = req.body;
+    
+    if (!backupService) {
+      return res.status(500).json({ error: 'Backup service not available' });
+    }
+    
+    const deletedCount = await backupService.cleanupOldBackups(
+      projectId,
+      req.user.id,
+      keepCount
+    );
+    
+    res.json({ 
+      success: true,
+      message: `Cleaned up ${deletedCount} old backups`,
+      deletedCount
+    });
+  } catch (error: any) {
+    console.error('Failed to cleanup backups:', error);
+    res.status(500).json({ error: 'Failed to cleanup backups' });
   }
 });
 
@@ -3448,12 +3862,18 @@ app.get('/projects/:id/preview/:previewId/inspection', async (req: any, res: any
   }
   
   try {
-    const { data: { user }, error } = await supabase.auth.getUser(token);
+    console.log(`🔑 [Inspection Preview] Using service client to verify token...`);
+    const { data: { user }, error } = await supabaseService.auth.getUser(token);
+    console.log(`🔑 [Inspection Preview] Auth result:`, { user: user?.id || 'none', error: error?.message || 'none' });
+    
     if (error || !user) {
+      console.log(`❌ [Inspection Preview] Authentication failed:`, error?.message || 'Unknown error');
       return res.status(401).json({ error: 'Invalid authentication token' });
     }
+    console.log(`✅ [Inspection Preview] User authenticated: ${user.id}`);
     req.user = user;
   } catch (error) {
+    console.log(`❌ [Inspection Preview] Authentication exception:`, error);
     return res.status(401).json({ error: 'Authentication failed' });
   }
   
@@ -3473,9 +3893,16 @@ app.get('/projects/:id/preview/:previewId/inspection', async (req: any, res: any
     }
     
     // Fetch the original preview HTML
-    console.log(`📡 [Inspection Preview] Fetching original content from: ${preview.url}`);
-    const originalResponse = await fetch(preview.url);
+    const baseUrl = preview.internalUrl || `http://localhost:${preview.port}`;
+    console.log(`📡 [Inspection Preview] Fetching original content from: ${baseUrl}`);
+    console.log(`📡 [Inspection Preview] Preview details:`, { 
+      internalUrl: preview.internalUrl, 
+      port: preview.port, 
+      status: preview.status 
+    });
+    const originalResponse = await fetch(baseUrl);
     if (!originalResponse.ok) {
+      console.log(`❌ [Inspection Preview] Fetch failed with status: ${originalResponse.status} ${originalResponse.statusText}`);
       return res.status(originalResponse.status).json({ error: 'Failed to fetch preview content' });
     }
     
