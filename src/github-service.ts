@@ -39,9 +39,7 @@ class GitHubService {
         name: repoData.name,
         description: repoData.description || `Generated project: ${repoData.name}`,
         private: repoData.private || false,
-        auto_init: repoData.auto_init || true,
-        gitignore_template: 'Node',
-        license_template: 'mit'
+        auto_init: repoData.auto_init !== undefined ? repoData.auto_init : false
       });
 
       console.log(`✅ Personal GitHub repo created: ${response.data.html_url}`);
@@ -64,9 +62,7 @@ class GitHubService {
         name: repoData.name,
         description: repoData.description || `Generated project: ${repoData.name}`,
         private: repoData.private || false,
-        auto_init: repoData.auto_init || true,
-        gitignore_template: 'Node',
-        license_template: 'mit'
+        auto_init: repoData.auto_init !== undefined ? repoData.auto_init : false
       });
 
       console.log(`✅ Organization GitHub repo created: ${response.data.html_url}`);

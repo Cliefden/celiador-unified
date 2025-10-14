@@ -253,6 +253,148 @@ class VercelService {
   }
 
   /**
+   * Monitor deployment until completion
+   */
+  async waitForDeployment(deploymentId: string, maxWaitTime: number = 300000): Promise<any> {
+    const startTime = Date.now();
+    const pollInterval = 5000; // 5 seconds
+
+    console.log(`🔄 Monitoring deployment ${deploymentId} (max wait: ${maxWaitTime}ms)`);
+
+    while (Date.now() - startTime < maxWaitTime) {
+      try {
+        const deployment = await this.getDeployment(deploymentId);
+        console.log(`Deployment status: ${deployment.readyState || 'QUEUED'}`);
+
+        if (deployment.readyState === 'READY') {
+          console.log(`✅ Deployment completed: https://${deployment.url}`);
+          return {
+            success: true,
+            deploymentId,
+            deploymentUrl: `https://${deployment.url}`,
+            status: 'READY',
+            duration: Date.now() - startTime
+          };
+        } else if (deployment.readyState === 'ERROR' || deployment.readyState === 'CANCELED') {
+          throw new Error(`Deployment failed with status: ${deployment.readyState}`);
+        }
+
+        // Wait before next poll
+        await new Promise(resolve => setTimeout(resolve, pollInterval));
+      } catch (error: any) {
+        console.error('❌ Error monitoring deployment:', error.message);
+        throw error;
+      }
+    }
+
+    throw new Error(`Deployment timeout after ${maxWaitTime}ms`);
+  }
+
+  /**
+   * Get deployment logs
+   */
+  async getDeploymentLogs(deploymentId: string): Promise<any> {
+    try {
+      const url = this.teamId 
+        ? `${this.baseUrl}/v2/deployments/${deploymentId}/events?teamId=${this.teamId}`
+        : `${this.baseUrl}/v2/deployments/${deploymentId}/events`;
+
+      const response = await fetch(url, {
+        headers: {
+          'Authorization': `Bearer ${this.apiToken}`
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to get deployment logs: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error: any) {
+      console.error('❌ Failed to get deployment logs:', error.message);
+      throw new Error(`Failed to get deployment logs: ${error.message}`);
+    }
+  }
+
+  /**
+   * Check if deployment is ready
+   */
+  async isDeploymentReady(deploymentId: string): Promise<boolean> {
+    try {
+      const deployment = await this.getDeployment(deploymentId);
+      return deployment.readyState === 'READY';
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /**
+   * Get deployment metrics
+   */
+  async getDeploymentMetrics(deploymentId: string): Promise<any> {
+    try {
+      const deployment = await this.getDeployment(deploymentId);
+      const logs = await this.getDeploymentLogs(deploymentId);
+      
+      return {
+        deploymentId,
+        status: deployment.readyState,
+        url: deployment.url ? `https://${deployment.url}` : null,
+        createdAt: deployment.createdAt,
+        readyAt: deployment.readyAt,
+        duration: deployment.readyAt ? 
+          new Date(deployment.readyAt).getTime() - new Date(deployment.createdAt).getTime() : null,
+        buildTime: logs.length > 0 ? this.calculateBuildTime(logs) : null
+      };
+    } catch (error: any) {
+      console.error('❌ Failed to get deployment metrics:', error.message);
+      throw new Error(`Failed to get deployment metrics: ${error.message}`);
+    }
+  }
+
+  /**
+   * Calculate build time from deployment logs
+   */
+  private calculateBuildTime(logs: any[]): number | null {
+    const buildStart = logs.find(log => log.type === 'command' && log.payload?.text?.includes('npm run build'));
+    const buildEnd = logs.find(log => log.type === 'command-exit');
+    
+    if (buildStart && buildEnd) {
+      return new Date(buildEnd.created).getTime() - new Date(buildStart.created).getTime();
+    }
+    
+    return null;
+  }
+
+  /**
+   * Get all domains for a project
+   */
+  async getProjectDomains(projectId: string): Promise<any> {
+    try {
+      const url = this.teamId 
+        ? `${this.baseUrl}/v9/projects/${projectId}/domains?teamId=${this.teamId}`
+        : `${this.baseUrl}/v9/projects/${projectId}/domains`;
+
+      const response = await fetch(url, {
+        headers: {
+          'Authorization': `Bearer ${this.apiToken}`
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to get project domains: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return result.domains || [];
+    } catch (error: any) {
+      console.error('❌ Failed to get project domains:', error.message);
+      throw new Error(`Failed to get project domains: ${error.message}`);
+    }
+  }
+
+  /**
    * Get framework detection for a repository
    */
   getFrameworkForTemplate(templateKey: string): string {

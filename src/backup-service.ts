@@ -49,6 +49,11 @@ export class BackupService {
         .single();
 
       if (error) {
+        // Check if error is due to missing table - if so, log warning and return mock ID
+        if (error.message.includes('table') && error.message.includes('not') && error.message.includes('found')) {
+          console.warn(`[BackupService] file_backups table not found - backup disabled`);
+          return 'backup-disabled';
+        }
         throw new Error(`Failed to create backup: ${error.message}`);
       }
 
@@ -56,6 +61,11 @@ export class BackupService {
       return data.id;
     } catch (error: any) {
       console.error(`[BackupService] Error creating backup:`, error);
+      // Check if error is due to missing table - if so, log warning and return mock ID
+      if (error.message.includes('table') && error.message.includes('not') && error.message.includes('found')) {
+        console.warn(`[BackupService] file_backups table not found - backup disabled`);
+        return 'backup-disabled';
+      }
       throw error;
     }
   }

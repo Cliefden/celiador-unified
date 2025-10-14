@@ -198,7 +198,8 @@ class DeploymentOrchestrator {
       }
     };
 
-    return messages[stepType][status] || `${stepType} ${status}`;
+    const stepMessages = messages[stepType] as { [key: string]: string };
+    return stepMessages?.[status] || `${stepType} ${status}`;
   }
 
   /**
