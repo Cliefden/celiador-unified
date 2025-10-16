@@ -10,6 +10,87 @@ const getServices = (req: any) => ({
   db: req.app.locals.db
 });
 
+// GET /api/integrations/projects/:id/github-status - Get detailed GitHub integration status
+router.get('/api/integrations/projects/:id/github-status', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    
+    const { supabaseService, db } = getServices(req);
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    if (!supabaseService) {
+      return res.status(500).json({ error: 'Database not available' });
+    }
+
+    // Get both customer and platform GitHub connections
+    const customerGitHub = await db.getGitHubIntegration(req.user.id);
+    const platformGitHub = await db.getPlatformGitHubIntegration(req.user.id); // Include user ID for trial tracking
+    
+    // Platform connection with trial information
+    const platformConnection = {
+      type: 'platform',
+      connected: platformGitHub?.trial?.isActive !== false, // Connected if trial is active or not set
+      username: platformGitHub?.github_username || 'celiador-platform',
+      permissions: platformGitHub?.permissions || ['public_repo', 'read:org'],
+      tokenStatus: platformGitHub?.trial?.isExpired ? 'expired' : (platformGitHub?.token_status || 'valid'),
+      lastSync: platformGitHub?.last_sync || new Date().toISOString(),
+      trial: platformGitHub?.trial
+    };
+
+    const customerConnection = {
+      type: 'customer',
+      connected: !!customerGitHub,
+      username: customerGitHub?.github_username || null,
+      repoUrl: project.repoowner && project.reponame 
+        ? `https://github.com/${project.repoowner}/${project.reponame}`
+        : null,
+      permissions: customerGitHub ? ['repo', 'user:email'] : [],
+      tokenStatus: customerGitHub?.token_status || 'disconnected',
+      lastSync: customerGitHub?.last_sync || null
+    };
+
+    // Determine which connection is active for this project
+    let activeConnection = null;
+    if (project.repoowner && project.reponame) {
+      // Priority logic:
+      // 1. If customer has GitHub and explicitly set, use customer
+      // 2. If platform trial is expired, require customer connection
+      // 3. Otherwise use platform (trial active or no trial set)
+      if (customerGitHub && project.github_integration_type === 'customer') {
+        activeConnection = 'customer';
+      } else if (platformGitHub?.trial?.isExpired && !customerGitHub) {
+        activeConnection = null; // Force user to connect their GitHub
+      } else if (platformGitHub?.trial?.isExpired && customerGitHub) {
+        activeConnection = 'customer'; // Auto-migrate to customer GitHub
+      } else {
+        activeConnection = 'platform'; // Use platform GitHub (trial active or no trial)
+      }
+    }
+
+    const response = {
+      customerConnection,
+      platformConnection,
+      activeConnection,
+      projectLinked: !!project.repoowner && !!project.reponame,
+      repoInfo: project.repoowner && project.reponame ? {
+        owner: project.repoowner,
+        name: project.reponame,
+        fullName: `${project.repoowner}/${project.reponame}`,
+        private: project.repo_private || false,
+        defaultBranch: project.default_branch || 'main'
+      } : null
+    };
+    
+    res.json(response);
+  } catch (error) {
+    console.error('Failed to get GitHub integration status:', error);
+    res.status(500).json({ error: 'Failed to get GitHub integration status' });
+  }
+});
+
 // GET /api/integrations/projects/:id/status - Get integration status for a project
 router.get('/api/integrations/projects/:id/status', authenticateUser, async (req: any, res: any) => {
   try {
@@ -193,6 +274,57 @@ router.delete('/api/integrations/projects/:id/vercel', authenticateUser, async (
   } catch (error) {
     console.error('Failed to disconnect Vercel:', error);
     res.status(500).json({ error: 'Failed to disconnect Vercel integration' });
+  }
+});
+
+// POST /api/integrations/projects/:id/github-disconnect - Disconnect GitHub integration
+router.post('/api/integrations/projects/:id/github-disconnect', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const { type } = req.body; // 'customer' or 'platform'
+    
+    const { supabaseService, db } = getServices(req);
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    if (!supabaseService) {
+      return res.status(500).json({ error: 'Database not available' });
+    }
+
+    if (type === 'customer') {
+      // Remove customer GitHub integration
+      await db.removeGitHubIntegration(req.user.id);
+      
+      // If this project was using customer integration, clear the repo info
+      if (project.github_integration_type === 'customer') {
+        await db.updateProject(id, {
+          repoowner: null,
+          reponame: null,
+          github_integration_type: null,
+          repo_private: null,
+          default_branch: null
+        });
+      }
+    } else if (type === 'platform') {
+      // For platform disconnection, we just remove project linking since
+      // the platform token is managed by you globally
+      if (project.github_integration_type === 'platform') {
+        await db.updateProject(id, {
+          repoowner: null,
+          reponame: null,
+          github_integration_type: null,
+          repo_private: null,
+          default_branch: null
+        });
+      }
+    }
+
+    res.json({ success: true, message: `${type} GitHub integration disconnected` });
+  } catch (error) {
+    console.error('Failed to disconnect GitHub:', error);
+    res.status(500).json({ error: 'Failed to disconnect GitHub integration' });
   }
 });
 

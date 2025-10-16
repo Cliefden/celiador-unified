@@ -239,6 +239,140 @@ class DatabaseService {
     return data;
   }
 
+  async getPlatformGitHubIntegration(userId?: string) {
+    // Platform GitHub integration is managed globally, not per user
+    // For trial management, we need to check user's trial status
+    let trialInfo = null;
+    
+    if (userId) {
+      // Get user's profile for trial calculation
+      const { data: profile, error } = await this.supabaseService
+        .from('profiles')
+        .select('github_trial_started_at, github_trial_expires_at, creator')
+        .eq('id', userId)
+        .single();
+      
+      if (profile) {
+        let trialStarted = null;
+        let trialExpires = null;
+        
+        // Use proper trial fields if available
+        if (profile.github_trial_started_at && profile.github_trial_expires_at) {
+          trialStarted = new Date(profile.github_trial_started_at);
+          trialExpires = new Date(profile.github_trial_expires_at);
+        } else {
+          // Fallback: Auto-initialize trial for any user without trial data
+          const now = new Date();
+          
+          if (profile.creator) {
+            // Use account creation date as trial start
+            trialStarted = new Date(profile.creator);
+          } else {
+            // No creator timestamp available, use current time
+            trialStarted = now;
+          }
+          
+          // Default 30-day trial, but shorter for testing migration prompts
+          trialExpires = new Date(trialStarted.getTime() + 5 * 24 * 60 * 60 * 1000);
+          
+          // Initialize trial fields in database
+          await this.supabaseService
+            .from('profiles')
+            .update({
+              github_trial_started_at: trialStarted.toISOString(),
+              github_trial_expires_at: trialExpires.toISOString()
+            })
+            .eq('id', userId);
+        }
+        
+        if (trialStarted && trialExpires) {
+          const now = new Date();
+          
+          trialInfo = {
+            started: trialStarted.toISOString(),
+            expires: trialExpires.toISOString(),
+            isActive: now < trialExpires,
+            daysRemaining: Math.max(0, Math.ceil((trialExpires.getTime() - now.getTime()) / (24 * 60 * 60 * 1000))),
+            isExpired: now >= trialExpires
+          };
+        }
+      }
+    }
+    
+    return {
+      id: 'platform-github',
+      type: 'platform',
+      github_username: 'celiador-platform',
+      token_status: 'valid',
+      last_sync: new Date().toISOString(),
+      permissions: ['public_repo', 'read:org'],
+      trial: trialInfo
+    };
+  }
+
+  async removeGitHubIntegration(userId: string) {
+    if (!this.supabaseService) return null;
+    
+    const { error } = await this.supabaseService
+      .from('github_integrations')
+      .update({ 
+        deletedAt: new Date().toISOString(),
+        deleter: userId 
+      })
+      .eq('userId', userId)
+      .is('deletedAt', null);
+    
+    if (error) throw error;
+    return true;
+  }
+
+  // GitHub trial management
+  async initializeGitHubTrial(userId: string, trialDays: number = 30) {
+    if (!this.supabaseService) throw new Error('Database not available');
+    
+    const now = new Date();
+    const trialExpires = new Date(now.getTime() + trialDays * 24 * 60 * 60 * 1000);
+    
+    const { data, error } = await this.supabaseService
+      .from('profiles')
+      .update({
+        github_trial_started_at: now.toISOString(),
+        github_trial_expires_at: trialExpires.toISOString()
+      })
+      .eq('id', userId)
+      .select()
+      .single();
+    
+    if (error) throw error;
+    return data;
+  }
+  
+  async extendGitHubTrial(userId: string, additionalDays: number) {
+    if (!this.supabaseService) throw new Error('Database not available');
+    
+    // Get current trial info
+    const { data: profile, error: profileError } = await this.supabaseService
+      .from('profiles')
+      .select('github_trial_expires_at')
+      .eq('id', userId)
+      .single();
+    
+    if (profileError) throw profileError;
+    
+    const currentExpires = profile.github_trial_expires_at ? new Date(profile.github_trial_expires_at) : new Date();
+    const newExpires = new Date(currentExpires.getTime() + additionalDays * 24 * 60 * 60 * 1000);
+    
+    const { data, error } = await this.supabaseService
+      .from('profiles')
+      .update({ github_trial_expires_at: newExpires.toISOString() })
+      .eq('id', userId)
+      .select()
+      .single();
+    
+    if (error) throw error;
+    return data;
+  }
+
   // Service integrations
   async getServiceIntegrations(userId: string) {
     if (!this.supabaseService) return [];
