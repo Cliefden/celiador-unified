@@ -362,8 +362,5 @@ function createGitHubFileTreeService(accessToken?: string): GitHubFileTreeServic
   return new GitHubFileTreeService(token);
 }
 
-// CommonJS exports
-module.exports = {
-  GitHubFileTreeService,
-  createGitHubFileTreeService
-};
+// Export the factory function
+export { createGitHubFileTreeService };
