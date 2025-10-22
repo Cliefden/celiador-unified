@@ -1,5 +1,5 @@
 import express from 'express';
-import { authenticateUser } from '../middleware/auth';
+import { authenticateUser } from '../middleware/auth.js';
 
 const router = express.Router();
 
@@ -11,7 +11,7 @@ const getServices = (req: any) => ({
 });
 
 // Helper functions (TODO: Move to separate service modules)
-import { createGitHubFileTreeService } from '../github-filetree-service';
+import { createGitHubFileTreeService } from '../github-filetree-service.js';
 
 async function getTemplateFileStructure(templateKey: string) {
   // Return template-based file structure

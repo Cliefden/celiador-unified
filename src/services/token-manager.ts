@@ -1,4 +1,4 @@
-import { VercelService } from './vercel';
+import { VercelService } from './vercel.js';
 
 interface UserTokenInfo {
   hasPersonalToken: boolean;

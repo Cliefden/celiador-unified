@@ -1,8 +1,8 @@
 import express from 'express';
-import { authenticateUser } from '../middleware/auth';
-import { DeploymentOrchestrator } from '../deployment-orchestrator';
-import { VercelService } from '../services/vercel';
-import { TokenManager } from '../services/token-manager';
+import { authenticateUser } from '../middleware/auth.js';
+import { DeploymentOrchestrator } from '../deployment-orchestrator.js';
+import { VercelService } from '../services/vercel.js';
+import { TokenManager } from '../services/token-manager.js';
 
 const router = express.Router();
 

@@ -1,4 +1,4 @@
-import { DatabaseService } from './database';
+import { DatabaseService } from './database.js';
 
 export interface JobData {
   id: string;

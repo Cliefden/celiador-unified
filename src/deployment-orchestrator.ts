@@ -1,6 +1,6 @@
 // Deployment orchestrator - coordinates GitHub repo creation, file upload, and Vercel deployment
-import { createGitHubService, GitHubService } from './github-service';
-import { createVercelService, VercelService } from './vercel-service';
+import { createGitHubService, GitHubService } from './github-service.js';
+import { createVercelService, VercelService } from './vercel-service.js';
 
 interface ProjectFiles {
   [path: string]: string;

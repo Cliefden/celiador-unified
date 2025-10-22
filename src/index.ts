@@ -4,28 +4,28 @@ import express from 'express';
 import { createClient } from '@supabase/supabase-js';
 
 // Import services
-import { DatabaseService } from './services/database';
-import { JobService } from './services/jobs';
-import { PreviewService } from './services/preview';
-import { VercelService } from './services/vercel';
+import { DatabaseService } from './services/database.js';
+import { JobService } from './services/jobs.js';
+import { PreviewService } from './services/preview.js';
+import { VercelService } from './services/vercel.js';
 
 // Import middleware
-import { corsMiddleware, requestLogger } from './middleware/cors';
-import { authenticateUser } from './middleware/auth';
+import { corsMiddleware, requestLogger } from './middleware/cors.js';
+import { authenticateUser } from './middleware/auth.js';
 
 // Import routes
-import healthRoutes from './routes/health';
-import settingsRoutes from './routes/settings';
-import projectRoutes from './routes/projects';
-import conversationRoutes from './routes/conversations';
-import fileRoutes from './routes/files';
-import integrationRoutes from './routes/integrations';
-import jobRoutes from './routes/jobs';
-import previewRoutes from './routes/previews';
-import backupRoutes from './routes/backups';
-import userRoutes from './routes/user';
-import sessionRoutes from './routes/sessions';
-import deploymentRoutes from './routes/deployments';
+import healthRoutes from './routes/health.js';
+import settingsRoutes from './routes/settings.js';
+import projectRoutes from './routes/projects.js';
+import conversationRoutes from './routes/conversations.js';
+import fileRoutes from './routes/files.js';
+import integrationRoutes from './routes/integrations.js';
+import jobRoutes from './routes/jobs.js';
+import previewRoutes from './routes/previews.js';
+import backupRoutes from './routes/backups.js';
+import userRoutes from './routes/user.js';
+import sessionRoutes from './routes/sessions.js';
+import deploymentRoutes from './routes/deployments.js';
 
 const app = express();
 const port = parseInt(process.env.PORT || '8080', 10);

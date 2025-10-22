@@ -1,5 +1,5 @@
 import express from 'express';
-import { authenticateUser } from '../middleware/auth';
+import { authenticateUser } from '../middleware/auth.js';
 
 // Helper function to count files in a file tree structure
 function countFilesInTree(items: any[]): number {

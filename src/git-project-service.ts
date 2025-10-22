@@ -2,7 +2,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { GitTemplateService } from './git-template-service';
+import { GitTemplateService } from './git-template-service.js';
 
 const execAsync = promisify(exec);
 
