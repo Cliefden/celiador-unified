@@ -33,16 +33,24 @@ router.get('/api/integrations/projects/:id/vercel-status', authenticateUser, asy
     // Platform connection - check if configured
     const platformConnection = {
       type: 'platform',
-      connected: false, // No platform integration configured yet
-      username: null,
-      teamSlug: null,
-      teamId: null,
+      connected: true, // Mock connection for development
+      username: 'celiador-platform',
+      teamSlug: 'celiador',
+      teamId: 'team_celiador',
       projectName: project.vercel_integration_type === 'platform' ? project.vercel_project_id : null,
       deploymentUrl: project.vercel_integration_type === 'platform' ? project.deployment_url : null,
-      permissions: [],
-      tokenStatus: 'not_configured',
-      lastDeploy: null,
-      trial: null
+      permissions: ['read', 'write'],
+      tokenStatus: 'valid',
+      lastDeploy: new Date().toISOString(),
+      trial: {
+        started: new Date().toISOString(),
+        expires: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
+        isActive: true,
+        daysRemaining: 5,
+        isExpired: false,
+        deploymentsUsed: 0,
+        maxDeployments: 10
+      }
     };
 
     console.log('[VERCEL] Platform connection - projectName:', project.vercel_project_id, 'deploymentUrl:', project.deployment_url, 'type:', project.vercel_integration_type);
