@@ -26,33 +26,23 @@ router.get('/api/integrations/projects/:id/vercel-status', authenticateUser, asy
       return res.status(500).json({ error: 'Database not available' });
     }
 
-    // Use stable mock data - database schema issues persist
-    const customerVercel = null;
-    const platformVercel = { 
-      trial: {
-        started: new Date().toISOString(),
-        expires: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
-        isActive: true,
-        daysRemaining: 5,
-        isExpired: false,
-        deploymentsUsed: 0,
-        maxDeployments: 10
-      }
-    };
+    // Query actual Vercel integrations from database
+    const customerVercel: any = null; // TODO: Query customer Vercel integration
+    const platformVercel: any = null; // TODO: Query platform Vercel integration
     
-    // Platform connection with trial information
+    // Platform connection - check if configured
     const platformConnection = {
       type: 'platform',
-      connected: platformVercel?.trial?.isActive !== false,
-      username: platformVercel?.username || 'celiador-platform',
-      teamSlug: platformVercel?.team_slug || 'celiador',
-      teamId: platformVercel?.team_id || 'team_celiador',
+      connected: false, // No platform integration configured yet
+      username: null,
+      teamSlug: null,
+      teamId: null,
       projectName: project.vercel_integration_type === 'platform' ? project.vercel_project_id : null,
       deploymentUrl: project.vercel_integration_type === 'platform' ? project.deployment_url : null,
-      permissions: platformVercel?.permissions || ['read', 'write'],
-      tokenStatus: platformVercel?.trial?.isExpired ? 'expired' : (platformVercel?.token_status || 'valid'),
-      lastDeploy: platformVercel?.last_deploy || new Date().toISOString(),
-      trial: platformVercel?.trial
+      permissions: [],
+      tokenStatus: 'not_configured',
+      lastDeploy: null,
+      trial: null
     };
 
     console.log('[VERCEL] Platform connection - projectName:', project.vercel_project_id, 'deploymentUrl:', project.deployment_url, 'type:', project.vercel_integration_type);
@@ -88,9 +78,9 @@ router.get('/api/integrations/projects/:id/vercel-status', authenticateUser, asy
       }
     }
 
-    // Use mock deployment data - database schema issues persist
-    const recentDeployments = [];
-    const currentDeployment = null;
+    // TODO: Query actual deployment data from database
+    const recentDeployments: any[] = [];
+    const currentDeployment: any = null;
 
     const response = {
       customerConnection,
@@ -207,15 +197,15 @@ router.get('/api/integrations/projects/:id/github-status', authenticateUser, asy
           repoValidated = false;
           console.log(`[GITHUB] Repository API error ${repoResponse.status}: ${project.repoowner}/${project.reponame}`);
         }
-      } catch (error) {
-        if (error.name === 'AbortError') {
+      } catch (error: unknown) {
+        if ((error as Error).name === 'AbortError') {
           repoStatus = 'timeout';
           repoValidated = false;
           console.warn(`[GITHUB] Repository validation timeout: ${project.repoowner}/${project.reponame}`);
         } else {
           repoStatus = 'validation_error';
           repoValidated = false;
-          console.warn(`[GITHUB] Repository validation error:`, error.message);
+          console.warn(`[GITHUB] Repository validation error:`, (error as Error).message);
         }
       }
     }
@@ -585,8 +575,8 @@ router.post('/api/integrations/projects/:id/vercel-deploy', authenticateUser, as
         }
       }
       
-    } catch (repoError) {
-      if (repoError.name === 'AbortError') {
+    } catch (repoError: unknown) {
+      if ((repoError as Error).name === 'AbortError') {
         console.error('[VERCEL] Repository validation timeout');
         return res.status(400).json({ 
           error: 'Repository validation timeout',
@@ -594,10 +584,10 @@ router.post('/api/integrations/projects/:id/vercel-deploy', authenticateUser, as
         });
       }
       
-      console.error('[VERCEL] Repository validation error:', repoError.message);
+      console.error('[VERCEL] Repository validation error:', (repoError as Error).message);
       return res.status(400).json({ 
         error: 'Repository validation failed',
-        message: `Unable to validate repository ${project.repoowner}/${project.reponame}. Error: ${repoError.message}`
+        message: `Unable to validate repository ${project.repoowner}/${project.reponame}. Error: ${(repoError as Error).message}`
       });
     }
 
@@ -660,7 +650,7 @@ router.post('/api/integrations/projects/:id/vercel-deploy', authenticateUser, as
         message: 'Vercel deployment started successfully',
         buildLogs: `https://vercel.com/deployments/${deployment.id}`
       });
-    } catch (deployError) {
+    } catch (deployError: unknown) {
       console.error('[VERCEL] Real deployment failed:', deployError);
       
       // Fallback to mock deployment on API failure
@@ -688,8 +678,8 @@ router.post('/api/integrations/projects/:id/vercel-deploy', authenticateUser, as
         deploymentId,
         url: deploymentUrl,
         status: 'ERROR',
-        message: `Real deployment failed, using fallback URL: ${deployError.message}`,
-        error: deployError.message
+        message: `Real deployment failed, using fallback URL: ${(deployError as Error).message}`,
+        error: (deployError as Error).message
       });
     }
   } catch (error) {
@@ -782,7 +772,7 @@ router.get('/api/integrations/projects/:id/vercel-deployment/:deploymentId', aut
       let buildLogs = [];
       try {
         const logs = await vercelService.getDeploymentLogs(deploymentId);
-        buildLogs = logs.slice(-5).map(log => ({
+        buildLogs = logs.slice(-5).map((log: any) => ({
           timestamp: log.created,
           message: log.text || log.payload?.text || 'Build step completed',
           type: log.type

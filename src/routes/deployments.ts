@@ -336,7 +336,7 @@ router.post('/api/deployments/vercel/validate-token', authenticateUser, async (r
     if (isValid) {
       // Also get user info if token is valid
       try {
-        const user = await vercelService.client.user.getAuthenticatedUser();
+        const user = await vercelService.client.user.getAuthUser();
         res.json({
           success: true,
           valid: true,

@@ -224,7 +224,7 @@ router.get('/api/user/profile', authenticateUser, async (req: any, res: any) => 
 
       if (weekSessions) {
         sessionAnalytics.totalSessions = weekSessions.length;
-        const totalSeconds = weekSessions.reduce((sum, session) => sum + (session.total_duration_seconds || 0), 0);
+        const totalSeconds = weekSessions.reduce((sum: number, session: any) => sum + (session.total_duration_seconds || 0), 0);
         sessionAnalytics.totalHoursThisWeek = Math.round(totalSeconds / 3600 * 100) / 100; // Hours with 2 decimal places
         sessionAnalytics.averageSessionMinutes = weekSessions.length > 0 ? Math.round(totalSeconds / weekSessions.length / 60) : 0;
       }
@@ -360,7 +360,7 @@ router.get('/api/user/activity', authenticateUser, async (req: any, res: any) =>
     ]);
 
     // Combine and format activity items
-    const activityItems = [];
+    const activityItems: any[] = [];
 
     // Add job activities
     jobs.forEach((job: any) => {

@@ -208,7 +208,7 @@ export class TokenManager {
       // Get user info for the token
       let userInfo = null;
       try {
-        const user = await vercelService.client.user.getAuthenticatedUser();
+        const user = await vercelService.client.user.getAuthUser();
         userInfo = {
           id: user.user?.id,
           username: user.user?.username,

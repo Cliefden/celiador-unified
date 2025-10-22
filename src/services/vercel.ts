@@ -10,12 +10,8 @@ interface DeploymentFile {
 interface VercelProject {
   id: string;
   name: string;
-  framework: string | null;
-  targets?: {
-    production?: {
-      domain?: string;
-    };
-  };
+  framework: any; // Vercel API returns complex framework object
+  targets?: any; // Vercel API returns complex targets object
 }
 
 export class VercelService {
@@ -239,7 +235,7 @@ export class VercelService {
         teamId: this.teamId,
       });
 
-      return response.events || [];
+      return (response as any)?.events || response || [];
     } catch (error) {
       console.error('[VERCEL] Failed to get deployment logs:', error);
       return [];
@@ -648,7 +644,7 @@ export class VercelService {
    */
   async validateToken(): Promise<boolean> {
     try {
-      await this.vercel.user.getAuthenticatedUser();
+      await this.vercel.user.getAuthUser();
       return true;
     } catch (error) {
       console.error('[VERCEL] Token validation failed:', error);
