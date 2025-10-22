@@ -14,6 +14,8 @@
     "@octokit/rest": "^20.0.2",
     "@supabase/supabase-js": "^2.39.0",
     "@types/jsdom": "^21.1.7",
+    "@vercel/sdk": "^1.13.9",
+    "archiver": "^7.0.1",
     "cors": "^2.8.5",
     "dotenv": "^17.2.2",
     "express": "^4.18.2",

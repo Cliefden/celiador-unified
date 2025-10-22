@@ -7,6 +7,7 @@ import { createClient } from '@supabase/supabase-js';
 import { DatabaseService } from './services/database';
 import { JobService } from './services/jobs';
 import { PreviewService } from './services/preview';
+import { VercelService } from './services/vercel';
 
 // Import middleware
 import { corsMiddleware, requestLogger } from './middleware/cors';
@@ -22,6 +23,9 @@ import integrationRoutes from './routes/integrations';
 import jobRoutes from './routes/jobs';
 import previewRoutes from './routes/previews';
 import backupRoutes from './routes/backups';
+import userRoutes from './routes/user';
+import sessionRoutes from './routes/sessions';
+import deploymentRoutes from './routes/deployments';
 
 const app = express();
 const port = parseInt(process.env.PORT || '8080', 10);
@@ -36,6 +40,7 @@ let supabaseService: any = null;
 let db: any = null;
 let jobService: any = null;
 let previewService: any = null;
+let vercelService: any = null;
 
 try {
   if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
@@ -56,6 +61,14 @@ try {
     
     // Initialize preview service
     previewService = new PreviewService(db, supabaseService);
+    
+    // Initialize Vercel service if token is available
+    if (process.env.VERCEL_API_TOKEN && process.env.VERCEL_API_TOKEN !== 'your-vercel-token') {
+      vercelService = new VercelService(process.env.VERCEL_API_TOKEN, process.env.VERCEL_TEAM_ID);
+      console.log('✅ Vercel service initialized');
+    } else {
+      console.log('⚠️ Vercel service not initialized - API token not configured');
+    }
     
     console.log('✅ Supabase clients initialized');
     console.log('✅ Job service initialized');
@@ -81,16 +94,20 @@ app.locals.supabaseService = supabaseService;
 app.locals.db = db;
 app.locals.jobService = jobService;
 app.locals.previewService = previewService;
+app.locals.vercelService = vercelService;
 
 // Mount routes - order matters! More specific routes first
 app.use('/', healthRoutes);
 app.use('/api/settings', settingsRoutes);
+app.use('/', userRoutes);
+app.use('/', sessionRoutes); // Mount sessions before previews (previews has catch-all route)
+app.use('/', deploymentRoutes); // Mount deployment routes
 app.use('/projects', projectRoutes);
 app.use('/', conversationRoutes);
 app.use('/', fileRoutes);
 app.use('/', integrationRoutes);
 app.use('/', jobRoutes);
-app.use('/', previewRoutes);
+app.use('/', previewRoutes); // This has a catch-all route, so it must be last
 app.use('/backups', backupRoutes);
 
 // Mount templates route specifically to avoid conflicts with other routes

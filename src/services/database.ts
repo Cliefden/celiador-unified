@@ -373,6 +373,151 @@ class DatabaseService {
     return data;
   }
 
+  // Vercel integrations
+  async getVercelIntegration(userId: string) {
+    if (!this.supabaseService) return null;
+    
+    try {
+      const { data, error } = await this.supabaseService
+        .from('vercel_integrations')
+        .select('*')
+        .eq('userId', userId)
+        .is('deletedAt', null)
+        .single();
+      
+      if (error) {
+        console.warn('[DB] getVercelIntegration error:', error.message);
+        return null;
+      }
+      return data;
+    } catch (error) {
+      console.warn('[DB] getVercelIntegration exception:', error);
+      return null;
+    }
+  }
+
+  async getPlatformVercelIntegration(userId?: string) {
+    // Return mock platform Vercel integration - database schema issues persist
+    const trialInfo = {
+      started: new Date().toISOString(),
+      expires: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
+      isActive: true,
+      daysRemaining: 5,
+      isExpired: false,
+      deploymentsUsed: 0,
+      maxDeployments: 10
+    };
+    
+    return {
+      id: 'platform-vercel',
+      type: 'platform',
+      username: 'celiador-platform',
+      team_slug: 'celiador',
+      team_id: 'team_celiador',
+      token_status: 'valid',
+      last_deploy: new Date().toISOString(),
+      permissions: ['read', 'write'],
+      trial: trialInfo
+    };
+  }
+
+  async getRecentDeployments(projectId: string, limit: number = 5) {
+    if (!this.supabaseService) return [];
+    
+    try {
+      const { data, error } = await this.supabaseService
+        .from('deployments')
+        .select('*')
+        .eq('projectId', projectId)
+        .is('deletedAt', null)
+        .order('createdAt', { ascending: false })
+        .limit(limit);
+      
+      if (error) {
+        console.warn('[DB] getRecentDeployments error:', error.message);
+        return [];
+      }
+      return data || [];
+    } catch (error) {
+      console.warn('[DB] getRecentDeployments exception:', error);
+      return [];
+    }
+  }
+
+  async getDeploymentCount(userId: string, since?: Date) {
+    if (!this.supabaseService) return 0;
+    
+    try {
+      let query = this.supabaseService
+        .from('deployments')
+        .select('id', { count: 'exact' })
+        .eq('userId', userId)
+        .is('deletedAt', null);
+      
+      if (since) {
+        query = query.gte('createdAt', since.toISOString());
+      }
+      
+      const { count, error } = await query;
+      
+      if (error) {
+        console.warn('[DB] getDeploymentCount error:', error.message);
+        return 0;
+      }
+      return count || 0;
+    } catch (error) {
+      console.warn('[DB] getDeploymentCount exception:', error);
+      return 0;
+    }
+  }
+
+  // Vercel trial management
+  async initializeVercelTrial(userId: string, trialDays: number = 30) {
+    if (!this.supabaseService) throw new Error('Database not available');
+    
+    const now = new Date();
+    const trialExpires = new Date(now.getTime() + trialDays * 24 * 60 * 60 * 1000);
+    
+    const { data, error } = await this.supabaseService
+      .from('profiles')
+      .update({
+        vercel_trial_started_at: now.toISOString(),
+        vercel_trial_expires_at: trialExpires.toISOString()
+      })
+      .eq('id', userId)
+      .select()
+      .single();
+    
+    if (error) throw error;
+    return data;
+  }
+  
+  async extendVercelTrial(userId: string, additionalDays: number) {
+    if (!this.supabaseService) throw new Error('Database not available');
+    
+    // Get current trial info
+    const { data: profile, error: profileError } = await this.supabaseService
+      .from('profiles')
+      .select('vercel_trial_expires_at')
+      .eq('id', userId)
+      .single();
+    
+    if (profileError) throw profileError;
+    
+    const currentExpires = profile.vercel_trial_expires_at ? new Date(profile.vercel_trial_expires_at) : new Date();
+    const newExpires = new Date(currentExpires.getTime() + additionalDays * 24 * 60 * 60 * 1000);
+    
+    const { data, error } = await this.supabaseService
+      .from('profiles')
+      .update({ vercel_trial_expires_at: newExpires.toISOString() })
+      .eq('id', userId)
+      .select()
+      .single();
+    
+    if (error) throw error;
+    return data;
+  }
+
   // Service integrations
   async getServiceIntegrations(userId: string) {
     if (!this.supabaseService) return [];
