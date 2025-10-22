@@ -21,6 +21,7 @@ router.get('/healthz', (req: any, res: any) => {
 
 router.get('/api/status', (req: any, res: any) => {
   const jobService = req.app.locals.jobService;
+  const previewService = req.app.locals.previewService;
   res.json({
     status: 'operational',
     services: {
@@ -30,6 +31,7 @@ router.get('/api/status', (req: any, res: any) => {
       vercel: !!process.env.VERCEL_API_TOKEN
     },
     jobQueue: jobService ? jobService.getQueueStatus() : { length: 0, processing: false },
+    previewInstances: previewService ? Array.from((previewService as any).instances.keys()) : [],
     timestamp: new Date().toISOString()
   });
 });
