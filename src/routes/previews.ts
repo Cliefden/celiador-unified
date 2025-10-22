@@ -199,9 +199,13 @@ const handleProxyRequest = async (req: any, res: any) => {
   const additionalPath = req.params[0] || '';
   const isAssetRequest = additionalPath && (
     additionalPath.includes('/_next/') ||
-    additionalPath.match(/\.(css|js|png|jpg|jpeg|gif|svg|webp|ico|woff|woff2|ttf|eot)(\?|$)/) ||
+    additionalPath.match(/\.(css|js|json|png|jpg|jpeg|gif|svg|webp|ico|woff|woff2|ttf|eot|map)(\?|$)/) ||
     additionalPath.startsWith('static/') ||
-    additionalPath.startsWith('assets/')
+    additionalPath.startsWith('assets/') ||
+    additionalPath.includes('_devMiddlewareManifest') ||
+    additionalPath.includes('_devPagesManifest') ||
+    additionalPath.includes('webpack-hmr') ||
+    additionalPath.includes('__nextjs_original-stack-frame')
   );
 
   console.log(`🔍 [Preview Proxy] Asset detection: ${isAssetRequest ? 'ASSET' : 'CONTENT'} request for path: ${additionalPath}`);
@@ -1203,14 +1207,14 @@ router.get('/_next/*', async (req: any, res: any) => {
 router.get('/*', async (req: any, res: any) => {
   const path = req.path;
   
-  // Skip if this is already a handled route pattern
+  // Skip if this is already a handled route pattern - let these pass through to other routes
   if (path.startsWith('/projects/') || 
       path.startsWith('/api/') || 
       path.startsWith('/templates') ||
       path.startsWith('/backups') ||
       path.startsWith('/health') ||
       path.startsWith('/_next/')) {
-    return res.status(404).json({ error: 'Not found' });
+    return; // Don't handle this request, let it pass to other routes
   }
   
   console.log(`🔄 [Preview Navigation] Potential preview navigation request: ${path}`);
