@@ -252,9 +252,15 @@ export class PreviewService {
             console.warn(`[PreviewManager] Cleanup warning: ${cleanupError}`);
           }
 
+          console.log(`[PreviewManager] Attempting GitHub API download for ${project.repoowner}/${project.reponame}`);
+          console.log(`[PreviewManager] GitHub token available: ${!!process.env.GITHUB_ACCESS_TOKEN}`);
+          
           // Download repository using GitHub API (no cloning required!)
           const { createGitHubFileTreeService } = await import('../github-filetree-service');
+          console.log(`[PreviewManager] Creating GitHub service...`);
           const githubFileTreeService = createGitHubFileTreeService();
+          console.log(`[PreviewManager] GitHub service created, downloading to: ${localPath}`);
+          
           filesDownloaded = await githubFileTreeService.downloadRepositoryToPath(
             project.repoowner,
             project.reponame,
@@ -264,10 +270,14 @@ export class PreviewService {
           console.log(`[PreviewManager] ✅ Downloaded repository via GitHub API with ${filesDownloaded} files`);
           
         } catch (githubApiError) {
-          console.error(`[PreviewManager] GitHub API download failed: ${githubApiError}`);
+          console.error(`[PreviewManager] 🚨 GitHub API download FAILED for ${project.repoowner}/${project.reponame}:`);
+          console.error(`[PreviewManager] 🚨 Error details:`, githubApiError);
+          console.error(`[PreviewManager] 🚨 Error message:`, githubApiError instanceof Error ? githubApiError.message : 'Unknown error');
+          console.error(`[PreviewManager] 🚨 Error stack:`, githubApiError instanceof Error ? githubApiError.stack : 'No stack');
           errors.push(`GitHub API download failed: ${githubApiError instanceof Error ? githubApiError.message : 'Unknown error'}`);
           
           // Fall back to basic structure
+          console.log(`[PreviewManager] 🔄 Falling back to mock structure...`);
           await this.createBasicNextjsStructure(localPath, projectId);
           filesDownloaded = 1;
         }
