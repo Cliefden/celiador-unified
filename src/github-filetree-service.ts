@@ -102,9 +102,9 @@ export class GitHubFileTreeService {
     console.log(`[GitHubFileTree] Downloading ${owner}/${repo}#${branch} to ${localPath} via API`);
     
     try {
-      const fs = require('fs');
-      const path = require('path');
-      const fsPromises = require('fs').promises;
+      const fs = await import('fs');
+      const path = await import('path');
+      const fsPromises = fs.promises;
 
       // Ensure local directory exists
       await fsPromises.mkdir(localPath, { recursive: true });
@@ -146,9 +146,9 @@ export class GitHubFileTreeService {
    * Download file tree items recursively with parallel file downloads
    */
   private async downloadFileTreeItems(owner: string, repo: string, branch: string, items: FileTreeItem[], basePath: string): Promise<void> {
-    const fs = require('fs');
-    const path = require('path');
-    const fsPromises = require('fs').promises;
+    const fs = await import('fs');
+    const path = await import('path');
+    const fsPromises = fs.promises;
 
     // Create all directories first
     for (const item of items) {
