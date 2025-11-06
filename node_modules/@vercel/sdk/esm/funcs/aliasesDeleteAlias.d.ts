@@ -1,0 +1,17 @@
+import { VercelCore } from "../core.js";
+import { RequestOptions } from "../lib/sdks.js";
+import { DeleteAliasRequest, DeleteAliasResponseBody } from "../models/deletealiasop.js";
+import { ConnectionError, InvalidRequestError, RequestAbortedError, RequestTimeoutError, UnexpectedClientError } from "../models/httpclienterrors.js";
+import { ResponseValidationError } from "../models/responsevalidationerror.js";
+import { SDKValidationError } from "../models/sdkvalidationerror.js";
+import { VercelError } from "../models/vercelerror.js";
+import { APIPromise } from "../types/async.js";
+import { Result } from "../types/fp.js";
+/**
+ * Delete an Alias
+ *
+ * @remarks
+ * Delete an Alias with the specified ID.
+ */
+export declare function aliasesDeleteAlias(client: VercelCore, request: DeleteAliasRequest, options?: RequestOptions): APIPromise<Result<DeleteAliasResponseBody, VercelError | ResponseValidationError | ConnectionError | RequestAbortedError | RequestTimeoutError | InvalidRequestError | UnexpectedClientError | SDKValidationError>>;
+//# sourceMappingURL=aliasesDeleteAlias.d.ts.map

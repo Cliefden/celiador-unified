@@ -1,0 +1,17 @@
+import { VercelCore } from "../core.js";
+import { RequestOptions } from "../lib/sdks.js";
+import { GetDeploymentFileContentsRequest } from "../models/getdeploymentfilecontentsop.js";
+import { ConnectionError, InvalidRequestError, RequestAbortedError, RequestTimeoutError, UnexpectedClientError } from "../models/httpclienterrors.js";
+import { ResponseValidationError } from "../models/responsevalidationerror.js";
+import { SDKValidationError } from "../models/sdkvalidationerror.js";
+import { VercelError } from "../models/vercelerror.js";
+import { APIPromise } from "../types/async.js";
+import { Result } from "../types/fp.js";
+/**
+ * Get Deployment File Contents
+ *
+ * @remarks
+ * Allows to retrieve the content of a file by supplying the file identifier and the deployment unique identifier. The response body will contain a JSON response containing the contents of the file encoded as base64.
+ */
+export declare function deploymentsGetDeploymentFileContents(client: VercelCore, request: GetDeploymentFileContentsRequest, options?: RequestOptions): APIPromise<Result<void, VercelError | ResponseValidationError | ConnectionError | RequestAbortedError | RequestTimeoutError | InvalidRequestError | UnexpectedClientError | SDKValidationError>>;
+//# sourceMappingURL=deploymentsGetDeploymentFileContents.d.ts.map

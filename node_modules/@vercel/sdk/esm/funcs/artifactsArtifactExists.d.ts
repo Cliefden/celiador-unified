@@ -1,0 +1,17 @@
+import { VercelCore } from "../core.js";
+import { RequestOptions } from "../lib/sdks.js";
+import { ArtifactExistsRequest } from "../models/artifactexistsop.js";
+import { ConnectionError, InvalidRequestError, RequestAbortedError, RequestTimeoutError, UnexpectedClientError } from "../models/httpclienterrors.js";
+import { ResponseValidationError } from "../models/responsevalidationerror.js";
+import { SDKValidationError } from "../models/sdkvalidationerror.js";
+import { VercelError } from "../models/vercelerror.js";
+import { APIPromise } from "../types/async.js";
+import { Result } from "../types/fp.js";
+/**
+ * Check if a cache artifact exists
+ *
+ * @remarks
+ * Check that a cache artifact with the given `hash` exists. This request returns response headers only and is equivalent to a `GET` request to this endpoint where the response contains no body.
+ */
+export declare function artifactsArtifactExists(client: VercelCore, request: ArtifactExistsRequest, options?: RequestOptions): APIPromise<Result<void, VercelError | ResponseValidationError | ConnectionError | RequestAbortedError | RequestTimeoutError | InvalidRequestError | UnexpectedClientError | SDKValidationError>>;
+//# sourceMappingURL=artifactsArtifactExists.d.ts.map

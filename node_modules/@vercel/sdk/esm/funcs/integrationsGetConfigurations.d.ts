@@ -1,0 +1,17 @@
+import { VercelCore } from "../core.js";
+import { RequestOptions } from "../lib/sdks.js";
+import { GetConfigurationsRequest, GetConfigurationsResponseBody } from "../models/getconfigurationsop.js";
+import { ConnectionError, InvalidRequestError, RequestAbortedError, RequestTimeoutError, UnexpectedClientError } from "../models/httpclienterrors.js";
+import { ResponseValidationError } from "../models/responsevalidationerror.js";
+import { SDKValidationError } from "../models/sdkvalidationerror.js";
+import { VercelError } from "../models/vercelerror.js";
+import { APIPromise } from "../types/async.js";
+import { Result } from "../types/fp.js";
+/**
+ * Get configurations for the authenticated user or team
+ *
+ * @remarks
+ * Allows to retrieve all configurations for an authenticated integration. When the `project` view is used, configurations generated for the authorization flow will be filtered out of the results.
+ */
+export declare function integrationsGetConfigurations(client: VercelCore, request: GetConfigurationsRequest, options?: RequestOptions): APIPromise<Result<GetConfigurationsResponseBody, VercelError | ResponseValidationError | ConnectionError | RequestAbortedError | RequestTimeoutError | InvalidRequestError | UnexpectedClientError | SDKValidationError>>;
+//# sourceMappingURL=integrationsGetConfigurations.d.ts.map

@@ -1,0 +1,4672 @@
+// Legacy routes (temporary during migration)
+const express = require('express');
+const { JSDOM } = require('jsdom');
+const { aiService } = require('./ai-service');
+const { createGitHubService } = require('./github-service');
+import { createGitHubFileTreeService } from './github-filetree-service';
+const { createVercelService } = require('./vercel-service');
+const { DeploymentOrchestrator } = require('./deployment-orchestrator');
+const fs = require('fs');
+const fsPromises = require('fs').promises;
+
+const router = express.Router();
+
+// Access services from app.locals (set by main index.ts)
+const getServices = (req: any) => ({
+  supabase: req.app.locals.supabase,
+  supabaseService: req.app.locals.supabaseService,
+  db: req.app.locals.db,
+  jobService: req.app.locals.jobService
+});
+
+// Use database service from app.locals instead of local db object
+
+
+// Job processor function
+async function processJob(job: any) {
+  console.log(`Processing job ${job.id}:`, job.type);
+  
+  try {
+    // Update job status to running
+    await db.updateJobStatus(job.id, 'RUNNING');
+    
+    // Simple job processing logic
+    let result;
+    switch (job.type) {
+      case 'SCAFFOLD':
+        result = await processScaffoldJob(job);
+        break;
+      case 'CODEGEN':
+        result = await processCodegenJob(job);
+        break;
+      case 'GITHUB_REPO_CREATE':
+        result = await processGitHubRepoCreateJob(job);
+        break;
+      case 'COMMIT':
+        result = await processCommitJob(job);
+        break;
+      case 'FILE_CREATE':
+        result = await processFileCreateJob(job);
+        break;
+      case 'FILE_UPDATE':
+        result = await processFileUpdateJob(job);
+        break;
+      case 'FILE_DELETE':
+        result = await processFileDeleteJob(job);
+        break;
+      case 'FILE_BATCH':
+        result = await processFileBatchJob(job);
+        break;
+      default:
+        result = { message: `Job type ${job.type} processed successfully` };
+    }
+    
+    // Update job status to completed
+    await db.updateJobStatus(job.id, 'COMPLETED', result);
+    console.log(`✅ Job ${job.id} completed successfully`);
+    
+  } catch (error: any) {
+    console.error(`❌ Job ${job.id} failed:`, error);
+    await db.updateJobStatus(job.id, 'FAILED', null, error.message);
+  }
+}
+
+// Scaffold job processor - Git-based version with Supabase validation
+async function processScaffoldJob(job: any) {
+  console.log(`[Scaffold] Processing validated Git-based scaffold job for template: ${job.templateKey}`);
+  
+  const { templateKey, projectId, userId } = job;
+  
+  try {
+    // Get project details from database
+    const project = await db.getProjectById(projectId);
+    if (!project) {
+      throw new Error(`Project ${projectId} not found`);
+    }
+
+    // Initialize Git services
+    const { GitProjectService } = require('./git-project-service');
+    const { GitTemplateService } = require('./git-template-service');
+    const gitProjectService = new GitProjectService(supabaseService);
+    const gitTemplateService = new GitTemplateService(supabaseService);
+    
+    // Validate template through Supabase and get repository URL
+    console.log(`[Scaffold] Validating template: ${templateKey}`);
+    const validatedTemplate = await gitTemplateService.getValidatedTemplate(templateKey);
+    
+    if (!validatedTemplate) {
+      throw new Error(`Template '${templateKey}' not found or inactive in database`);
+    }
+    
+    const templateRepoUrl = validatedTemplate.storage_path;
+    console.log(`[Scaffold] ✅ Template validated: ${validatedTemplate.name} -> ${templateRepoUrl}`);
+    
+    // Local fallback for development (only if storage_path starts with /)
+    if (templateRepoUrl?.startsWith('/')) {
+      console.log(`[Scaffold] Using local template path: ${templateRepoUrl}`);
+    } else if (!templateRepoUrl || !templateRepoUrl.startsWith('https://github.com/celiador-templates/')) {
+      throw new Error(`Invalid or missing repository URL for template '${templateKey}': ${templateRepoUrl}`);
+    }
+    
+    // Wait for GitHub repository to be created (if not already done)
+    let userRepoUrl = project.repourl;
+    if (!userRepoUrl) {
+      // Get user profile to get username for repository naming
+      const { data: userProfile } = await supabaseService
+        .from('profiles')
+        .select('username')
+        .eq('id', userId)
+        .single();
+      
+      const username = userProfile?.username || 'user';
+      
+      // Generate repo URL based on project configuration  
+      const baseRepoName = project.reponame || GitProjectService.generateRepoName(project.name);
+      
+      // Check if reponame already includes username prefix to avoid double prefix
+      const repoNameWithUser = baseRepoName.startsWith(`${username}-`) 
+        ? baseRepoName 
+        : `${username}-${baseRepoName}`;
+      
+      const repoOwner = project.repoowner || 'celiador-repos';
+      userRepoUrl = `https://github.com/${repoOwner}/${repoNameWithUser}.git`;
+      
+      console.log(`[Scaffold] Generated repo URL with username: ${userRepoUrl}`);
+    }
+    
+    console.log(`[Scaffold] Initializing Git-based project from template: ${templateRepoUrl}`);
+    
+    // Initialize Git project from template
+    const gitProject = await gitProjectService.initializeProject(
+      projectId,
+      project.name,
+      templateRepoUrl,
+      userRepoUrl,
+      userId
+    );
+    
+    console.log(`[Scaffold] Successfully initialized Git project: ${gitProject.repoUrl}`);
+    
+    // Update project with repository URL
+    await db.updateProject(projectId, {
+      repourl: gitProject.repoUrl,
+      repocreated: true,
+      status: 'active'
+    });
+    
+    // Cleanup temporary files
+    await gitProjectService.cleanup(gitProject.localPath);
+    
+    return {
+      success: true,
+      message: `Project scaffolded with ${templateKey} template in Git repository`,
+      repoUrl: gitProject.repoUrl,
+      branch: gitProject.branch,
+      timestamp: new Date().toISOString()
+    };
+    
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error(`[Scaffold] Failed to scaffold Git project ${projectId}: ${errorMessage}`);
+    
+    return {
+      success: false,
+      message: `Failed to scaffold Git project: ${errorMessage}`,
+      error: errorMessage,
+      timestamp: new Date().toISOString()
+    };
+  }
+}
+
+// Codegen job processor
+async function processCodegenJob(job: any) {
+  console.log(`Generating code for prompt: ${job.prompt}`);
+  
+  // Simulate codegen work
+  await new Promise(resolve => setTimeout(resolve, 3000));
+  
+  return {
+    success: true,
+    message: `Code generated for: ${job.prompt}`,
+    timestamp: new Date().toISOString()
+  };
+}
+
+// GitHub repo creation job processor
+async function processGitHubRepoCreateJob(job: any) {
+  console.log(`Creating GitHub repository: ${job.repoName} for project ${job.projectId}`);
+  
+  try {
+    // Get user profile to get username for repository naming
+    const { data: userProfile } = await supabaseService
+      .from('profiles')
+      .select('username')
+      .eq('id', job.userId)
+      .single();
+    
+    const username = userProfile?.username || 'user';
+    
+    // Get GitHub token from environment or integration
+    const githubService = createGitHubService(process.env.GITHUB_ACCESS_TOKEN);
+    
+    const orgName = 'celiador-repos';
+    
+    // Generate repository name with username prefix for demo/testing
+    const repoNameWithUser = `${username}-${job.repoName}`;
+    
+    console.log(`Creating GitHub repo in org celiador-repos: ${repoNameWithUser}`);
+    
+    // Check if organization exists (optional validation)
+    const orgExists = await githubService.organizationExists(orgName);
+    if (!orgExists) {
+      console.warn(`⚠️ Organization ${orgName} not found, falling back to personal account`);
+    }
+    
+    // Create repository in organization or personal account
+    const repoResult = orgExists 
+      ? await githubService.createRepositoryInOrg(orgName, {
+          name: repoNameWithUser,
+          description: `Generated project by ${username}: ${job.projectName}`,
+          private: false,
+          auto_init: false
+        })
+      : await githubService.createRepository({
+          name: repoNameWithUser,
+          description: `Generated project by ${username}: ${job.projectName}`,
+          private: false,
+          auto_init: false
+        });
+
+    // Update project with GitHub repo information
+    console.log(`[GitHubJob] Updating project ${job.projectId} with:`, {
+      repo_url: repoResult.repoUrl,
+      repo_created: true,
+      repoowner: orgName,
+      reponame: repoNameWithUser,
+      repoprovider: 'github'
+    });
+    
+    // Update project fields one by one to work around trigger bug
+    console.log(`[GitHubJob] Updating database fields individually to work around trigger bug...`);
+    
+    let updateError = null;
+    
+    // Update repo metadata first (less likely to trigger the problematic function)
+    console.log(`[GitHubJob] Step 1: Updating repo metadata...`);
+    const { error: error1 } = await supabaseService
+      .from('projects')
+      .update({
+        repoowner: orgName,
+        reponame: repoNameWithUser,
+        repoprovider: 'github'
+      })
+      .eq('id', job.projectId);
+    
+    if (error1) {
+      console.warn(`[GitHubJob] Step 1 failed:`, error1.message);
+      updateError = error1;
+    } else {
+      console.log(`[GitHubJob] Step 1 succeeded`);
+    }
+    
+    // Update repo URL separately 
+    console.log(`[GitHubJob] Step 2: Updating repo URL...`);
+    const { error: error2 } = await supabaseService
+      .from('projects')
+      .update({ repo_url: repoResult.repoUrl })
+      .eq('id', job.projectId);
+    
+    if (error2) {
+      console.warn(`[GitHubJob] Step 2 failed:`, error2.message);
+      updateError = error2;
+    } else {
+      console.log(`[GitHubJob] Step 2 succeeded`);
+    }
+    
+    // Update repo_created last
+    console.log(`[GitHubJob] Step 3: Updating repo_created flag...`);
+    const { error: error3 } = await supabaseService
+      .from('projects')
+      .update({ repo_created: true })
+      .eq('id', job.projectId);
+    
+    if (error3) {
+      console.warn(`[GitHubJob] Step 3 failed:`, error3.message);
+      updateError = error3;
+    } else {
+      console.log(`[GitHubJob] Step 3 succeeded`);
+    }
+    console.log(`[GitHubJob] Database update completed - checking for trigger errors...`);
+
+    if (updateError) {
+      console.error(`❌ Failed to update project ${job.projectId}:`, updateError);
+      throw new Error(`Database update failed: ${updateError.message}`);
+    }
+
+    console.log(`✅ GitHub repo created and project updated: ${repoResult.repoUrl}`);
+
+    return {
+      success: true,
+      repoUrl: repoResult.repoUrl,
+      repoOwner: repoResult.owner,
+      repoName: repoResult.name,
+      message: `GitHub repository created successfully: ${repoResult.repoUrl}`,
+      timestamp: new Date().toISOString()
+    };
+  } catch (error: any) {
+    console.error(`❌ GitHub repo creation failed:`, error.message);
+    throw error;
+  }
+}
+
+// Commit job processor
+async function processCommitJob(job: any) {
+  console.log(`Creating commit for project ${job.projectId}: ${job.commit_message}`);
+  
+  try {
+    // Get project details to get repo information
+    const project = await db.getProjectById(job.projectId);
+    if (!project || !project.repo_url) {
+      throw new Error('Project not found or GitHub repository not created');
+    }
+
+    const githubService = createGitHubService(process.env.GITHUB_ACCESS_TOKEN);
+    
+    // For now, create a simple commit with a README update
+    // In production, this would handle actual project files
+    const commitResult = await githubService.createInitialCommit({
+      owner: project.repoowner,
+      repo: project.reponame,
+      path: 'README.md',
+      message: job.commit_message || 'Update project files',
+      content: `# ${project.name}\n\nGenerated project using Celiador.\n\nLast updated: ${new Date().toISOString()}`
+    });
+
+    // Update job with commit information
+    await supabaseService
+      .from('jobs')
+      .update({
+        commit_hash: commitResult.commitSha,
+        commit_message: job.commit_message || 'Update project files',
+        branch_name: 'main'
+      })
+      .eq('id', job.id);
+
+    console.log(`✅ Commit created: ${commitResult.commitSha}`);
+
+    return {
+      success: true,
+      commitHash: commitResult.commitSha,
+      commitUrl: commitResult.commitUrl,
+      message: `Commit created successfully: ${commitResult.commitSha}`,
+      timestamp: new Date().toISOString()
+    };
+  } catch (error: any) {
+    console.error(`❌ Commit creation failed:`, error.message);
+    throw error;
+  }
+}
+
+// Import backup service
+const BackupService = require('./backup-service').default;
+let backupService: any = null;
+
+// Initialize backup service lazily
+const getBackupService = (supabaseService: any) => {
+  if (!backupService && supabaseService) {
+    backupService = new BackupService(supabaseService);
+  }
+  return backupService;
+};
+
+// File operation job processors
+async function processFileCreateJob(job: any) {
+  console.log(`Creating file: ${job.filePath} for project ${job.projectId}`);
+  
+  try {
+    const { supabaseService, db } = getServices(req);
+    if (!supabaseService) {
+      throw new Error('Storage service not available');
+    }
+
+    const storagePath = `${job.userId}/${job.projectId}/${job.filePath}`;
+    
+    // Save to Supabase Storage
+    const { data, error } = await supabaseService.storage
+      .from('project-files')
+      .upload(storagePath, job.content || '', {
+        contentType: getFileContentType(job.filePath),
+        upsert: false // Don't overwrite existing files
+      });
+
+    if (error) {
+      throw new Error(`Storage error: ${error.message}`);
+    }
+
+    return {
+      success: true,
+      filePath: job.filePath,
+      size: job.content?.length || 0,
+      storageKey: data.path,
+      message: `File ${job.filePath} created successfully`,
+      timestamp: new Date().toISOString()
+    };
+  } catch (error: any) {
+    console.error(`❌ File creation failed:`, error.message);
+    throw error;
+  }
+}
+
+async function processFileUpdateJob(job: any) {
+  console.log(`Updating file: ${job.filePath} for project ${job.projectId}`);
+  
+  try {
+    const { supabaseService, db } = getServices(req);
+    if (!supabaseService) {
+      throw new Error('Storage service not available');
+    }
+
+    const storagePath = `${job.userId}/${job.projectId}/${job.filePath}`;
+    
+    // Create backup before updating
+    if (backupService) {
+      try {
+        const originalContent = await backupService.getFileContentForBackup(
+          job.userId,
+          job.projectId,
+          job.filePath
+        );
+        
+        const backupId = await backupService.createBackup(
+          job.userId,
+          job.projectId,
+          job.filePath,
+          originalContent,
+          'update',
+          job.id
+        );
+        
+        console.log(`✅ Backup created: ${backupId} for file update`);
+      } catch (backupError) {
+        console.warn(`⚠️ Failed to create backup for ${job.filePath}:`, backupError);
+        // Continue with update even if backup fails
+      }
+    }
+    
+    // Update file in Supabase Storage
+    const { data, error } = await supabaseService.storage
+      .from('project-files')
+      .upload(storagePath, job.content || '', {
+        contentType: getFileContentType(job.filePath),
+        upsert: true // Overwrite existing file
+      });
+
+    if (error) {
+      throw new Error(`Storage error: ${error.message}`);
+    }
+
+    return {
+      success: true,
+      filePath: job.filePath,
+      size: job.content?.length || 0,
+      storageKey: data.path,
+      message: `File ${job.filePath} updated successfully`,
+      timestamp: new Date().toISOString()
+    };
+  } catch (error: any) {
+    console.error(`❌ File update failed:`, error.message);
+    throw error;
+  }
+}
+
+async function processFileDeleteJob(job: any) {
+  console.log(`Deleting file: ${job.filePath} for project ${job.projectId}`);
+  
+  try {
+    const { supabaseService, db } = getServices(req);
+    if (!supabaseService) {
+      throw new Error('Storage service not available');
+    }
+
+    const storagePath = `${job.userId}/${job.projectId}/${job.filePath}`;
+    
+    // Create backup before deleting
+    if (backupService) {
+      try {
+        const originalContent = await backupService.getFileContentForBackup(
+          job.userId,
+          job.projectId,
+          job.filePath
+        );
+        
+        const backupId = await backupService.createBackup(
+          job.userId,
+          job.projectId,
+          job.filePath,
+          originalContent,
+          'delete',
+          job.id
+        );
+        
+        console.log(`✅ Backup created: ${backupId} for file deletion`);
+      } catch (backupError) {
+        console.warn(`⚠️ Failed to create backup for ${job.filePath}:`, backupError);
+        // Continue with deletion even if backup fails
+      }
+    }
+    
+    // Delete file from Supabase Storage
+    const { error } = await supabaseService.storage
+      .from('project-files')
+      .remove([storagePath]);
+
+    if (error) {
+      throw new Error(`Storage error: ${error.message}`);
+    }
+
+    return {
+      success: true,
+      filePath: job.filePath,
+      message: `File ${job.filePath} deleted successfully`,
+      timestamp: new Date().toISOString()
+    };
+  } catch (error: any) {
+    console.error(`❌ File deletion failed:`, error.message);
+    throw error;
+  }
+}
+
+async function processFileBatchJob(job: any) {
+  console.log(`Processing batch file operations for project ${job.projectId}`);
+  
+  try {
+    const results = [];
+    
+    for (const operation of job.operations) {
+      let result;
+      
+      switch (operation.type) {
+        case 'create_file':
+          result = await processFileCreateJob({
+            ...job,
+            filePath: operation.path,
+            content: operation.content
+          });
+          break;
+        case 'update_file':
+          result = await processFileUpdateJob({
+            ...job,
+            filePath: operation.path,
+            content: operation.content
+          });
+          break;
+        case 'delete_file':
+          result = await processFileDeleteJob({
+            ...job,
+            filePath: operation.path
+          });
+          break;
+        default:
+          throw new Error(`Unknown operation type: ${operation.type}`);
+      }
+      
+      results.push({
+        operation: operation.type,
+        path: operation.path,
+        result
+      });
+    }
+
+    return {
+      success: true,
+      operations: results.length,
+      results,
+      message: `Batch file operations completed (${results.length} operations)`,
+      timestamp: new Date().toISOString()
+    };
+  } catch (error: any) {
+    console.error(`❌ Batch file operations failed:`, error.message);
+    throw error;
+  }
+}
+
+
+// Helper functions for file management
+async function getTemplateFileStructure(templateKey: string) {
+  // Return template-based file structure
+  const structures: any = {
+    'next-prisma-supabase': [
+      {
+        name: 'src',
+        type: 'folder',
+        path: 'src',
+        children: [
+          {
+            name: 'app',
+            type: 'folder',
+            path: 'src/app',
+            children: [
+              { name: 'page.tsx', type: 'file', path: 'src/app/page.tsx', size: 1024 },
+              { name: 'layout.tsx', type: 'file', path: 'src/app/layout.tsx', size: 2048 },
+              { name: 'globals.css', type: 'file', path: 'src/app/globals.css', size: 512 }
+            ]
+          },
+          {
+            name: 'components',
+            type: 'folder',
+            path: 'src/components',
+            children: []
+          },
+          {
+            name: 'lib',
+            type: 'folder',
+            path: 'src/lib',
+            children: [
+              { name: 'supabase.ts', type: 'file', path: 'src/lib/supabase.ts', size: 800 }
+            ]
+          }
+        ]
+      },
+      { name: 'package.json', type: 'file', path: 'package.json', size: 512 },
+      { name: 'README.md', type: 'file', path: 'README.md', size: 256 },
+      { name: '.env.local.example', type: 'file', path: '.env.local.example', size: 200 }
+    ],
+    'blank-nextjs': [
+      {
+        name: 'src',
+        type: 'folder',
+        path: 'src',
+        children: [
+          {
+            name: 'app',
+            type: 'folder',
+            path: 'src/app',
+            children: [
+              { name: 'page.tsx', type: 'file', path: 'src/app/page.tsx', size: 512 },
+              { name: 'layout.tsx', type: 'file', path: 'src/app/layout.tsx', size: 1024 }
+            ]
+          }
+        ]
+      },
+      { name: 'package.json', type: 'file', path: 'package.json', size: 400 },
+      { name: 'README.md', type: 'file', path: 'README.md', size: 150 }
+    ]
+  };
+  
+  return structures[templateKey] || structures['blank-nextjs'];
+}
+
+async function buildFileTreeFromStorage(files: any[], projectId: string) {
+  // Convert flat file list to tree structure
+  const tree: any[] = [];
+  const folderMap = new Map();
+  
+  files.forEach(file => {
+    // Use fullPath from recursive traversal, or fall back to name
+    const filePath = file.fullPath || file.name;
+    const parts = filePath.split('/');
+    let currentLevel = tree;
+    let currentPath = '';
+    
+    parts.forEach((part: string, index: number) => {
+      currentPath += (currentPath ? '/' : '') + part;
+      
+      if (index === parts.length - 1) {
+        // Check if this is actually a file (has metadata/id) or empty folder
+        const isFile = file.id || file.metadata;
+        if (isFile) {
+          // It's a file
+          currentLevel.push({
+            name: part,
+            type: 'file',
+            path: currentPath,
+            size: file.metadata?.size || 0,
+            updatedAt: file.updated_at
+          });
+        } else {
+          // It's an empty folder - only add if not already exists
+          let folder = currentLevel.find(item => item.name === part && item.type === 'directory');
+          if (!folder) {
+            folder = {
+              name: part,
+              type: 'directory',
+              path: currentPath,
+              children: []
+            };
+            currentLevel.push(folder);
+          }
+        }
+      } else {
+        // It's a folder in the path
+        let folder = currentLevel.find(item => item.name === part && item.type === 'directory');
+        if (!folder) {
+          folder = {
+            name: part,
+            type: 'directory',
+            path: currentPath,
+            children: []
+          };
+          currentLevel.push(folder);
+        }
+        currentLevel = folder.children;
+      }
+    });
+  });
+  
+  return tree;
+}
+
+async function getTemplateFileContent(path: string, project: any) {
+  const templates: any = {
+    'package.json': JSON.stringify({
+      name: project.name,
+      version: '1.0.0',
+      private: true,
+      scripts: {
+        dev: 'next dev',
+        build: 'next build',
+        start: 'next start',
+        lint: 'next lint'
+      },
+      dependencies: {
+        next: '^14.0.0',
+        react: '^18.0.0',
+        'react-dom': '^18.0.0'
+      },
+      devDependencies: {
+        '@types/node': '^20.0.0',
+        '@types/react': '^18.0.0',
+        '@types/react-dom': '^18.0.0',
+        eslint: '^8.0.0',
+        'eslint-config-next': '^14.0.0',
+        typescript: '^5.0.0'
+      }
+    }, null, 2),
+    'src/app/page.tsx': `export default function Home() {
+  return (
+    <main className="flex min-h-screen flex-col items-center justify-center p-24">
+      <div className="text-center">
+        <h1 className="text-4xl font-bold mb-4">
+          Welcome to ${project.name}
+        </h1>
+        <p className="text-lg text-gray-600">
+          Get started by editing <code className="bg-gray-100 px-2 py-1 rounded">src/app/page.tsx</code>
+        </p>
+      </div>
+    </main>
+  );
+}`,
+    'src/app/layout.tsx': `import type { Metadata } from 'next';
+
+export const metadata: Metadata = {
+  title: '${project.name}',
+  description: 'Generated by Celiador',
+};
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  );
+}`,
+    'README.md': `# ${project.name}
+
+This is a [Next.js](https://nextjs.org/) project generated with Celiador.
+
+## Getting Started
+
+First, run the development server:
+
+\`\`\`bash
+npm run dev
+# or
+yarn dev
+# or
+pnpm dev
+\`\`\`
+
+Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+
+## Learn More
+
+To learn more about Next.js, take a look at the following resources:
+
+- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
+- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+`,
+    '.env.local.example': `# Supabase
+NEXT_PUBLIC_SUPABASE_URL=your_supabase_url
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
+SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
+`,
+    'src/lib/supabase.ts': `import { createClient } from '@supabase/supabase-js';
+
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+
+export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+`
+  };
+  
+  if (templates[path]) {
+    return templates[path];
+  }
+  
+  // Generate content based on file extension
+  if (path.endsWith('.tsx') || path.endsWith('.ts')) {
+    const componentName = path.split('/').pop()?.replace(/\.[^/.]+$/, '') || 'Component';
+    return `// ${path}
+export default function ${componentName}() {
+  return (
+    <div>
+      <h1>Hello from ${componentName}</h1>
+    </div>
+  );
+}`;
+  }
+  
+  if (path.endsWith('.css')) {
+    return `/* ${path} */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+`;
+  }
+  
+  return `# ${path}
+
+This file was generated automatically.
+`;
+}
+
+function getFileContentType(path: string): string {
+  const ext = path.split('.').pop()?.toLowerCase();
+  const types: any = {
+    'js': 'application/javascript',
+    'jsx': 'application/javascript',
+    'ts': 'application/typescript',
+    'tsx': 'application/typescript',
+    'json': 'application/json',
+    'css': 'text/css',
+    'html': 'text/html',
+    'md': 'text/markdown',
+    'txt': 'text/plain'
+  };
+  return types[ext || ''] || 'text/plain';
+}
+
+// Preview functionality classes
+interface SyncResult {
+  success: boolean;
+  filesDownloaded: number;
+  errors: string[];
+  localPath: string;
+}
+
+interface PreviewInstance {
+  id: string;
+  projectId: string;
+  userId: string;
+  port: number;
+  url: string; // External proxy URL for client access
+  internalUrl?: string; // Internal localhost URL for server-side fetching
+  status: 'syncing' | 'starting' | 'running' | 'error' | 'stopped';
+  process?: any;
+  localPath?: string;
+  syncResult?: SyncResult;
+  startTime: Date;
+  lastAccessed: Date;
+  errorMessage?: string;
+}
+
+class PortManager {
+  private usedPorts = new Set<number>();
+  private readonly startPort = 3100;
+  private readonly endPort = 3200;
+
+  async allocatePort(): Promise<number> {
+    for (let port = this.startPort; port <= this.endPort; port++) {
+      if (!this.usedPorts.has(port)) {
+        // Check if port is actually available
+        const isAvailable = await this.isPortAvailable(port);
+        if (isAvailable) {
+          this.usedPorts.add(port);
+          return port;
+        }
+      }
+    }
+    throw new Error('No available ports');
+  }
+
+  releasePort(port: number): void {
+    this.usedPorts.delete(port);
+  }
+
+  private async isPortAvailable(port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const net = require('net');
+      const server = net.createServer();
+      
+      server.listen(port, () => {
+        server.once('close', () => resolve(true));
+        server.close();
+      });
+      
+      server.on('error', () => resolve(false));
+    });
+  }
+}
+
+class PreviewManager {
+  private instances = new Map<string, PreviewInstance>();
+  private portManager = new PortManager();
+  private readonly basePreviewDir = '/tmp/celiador-previews';
+
+  async startPreview(projectId: string, userId: string, name: string, type: string = 'nextjs', req?: any): Promise<PreviewInstance> {
+    const instanceId = `${projectId}-${Date.now()}`;
+    const port = await this.portManager.allocatePort();
+    
+    // Construct the proxy URL for Railway deployment
+    let baseUrl = process.env.NODE_ENV === 'production' 
+      ? (process.env.RAILWAY_PUBLIC_DOMAIN || 'https://celiador-unified-production.up.railway.app')
+      : 'http://localhost:' + (process.env.PORT || '4000');
+    
+    // Ensure production URLs always have https:// protocol
+    if (process.env.NODE_ENV === 'production' && !baseUrl.startsWith('http')) {
+      baseUrl = `https://${baseUrl}`;
+    }
+    
+    const proxyUrl = `${baseUrl}/projects/${projectId}/preview/${instanceId}/proxy/`;
+    const internalUrl = `http://localhost:${port}`; // Keep internal URL for server-side fetching
+    
+    console.log(`[PreviewManager] URL construction:`, {
+      NODE_ENV: process.env.NODE_ENV,
+      RAILWAY_PUBLIC_DOMAIN: process.env.RAILWAY_PUBLIC_DOMAIN,
+      baseUrl,
+      proxyUrl
+    });
+    
+    const instance: PreviewInstance = {
+      id: instanceId,
+      projectId,
+      userId,
+      port,
+      url: proxyUrl, // External URL for client access
+      internalUrl, // Internal URL for server-side proxy fetching
+      status: 'syncing',
+      startTime: new Date(),
+      lastAccessed: new Date()
+    };
+
+    this.instances.set(instanceId, instance);
+
+    try {
+      console.log(`[PreviewManager] Starting preview for ${name} on port ${port}`);
+      
+      // Create local directory for project
+      const localPath = `${this.basePreviewDir}/${userId}-${projectId}`;
+      instance.localPath = localPath;
+      
+      // Update status to starting
+      instance.status = 'starting';
+      
+      // Sync files from Supabase Storage
+      const syncResult = await this.syncProjectFiles(projectId, localPath, req);
+      instance.syncResult = syncResult;
+      
+      if (!syncResult.success) {
+        instance.status = 'error';
+        instance.errorMessage = `File sync failed: ${syncResult.errors.join(', ')}`;
+        this.portManager.releasePort(port);
+        throw new Error(instance.errorMessage);
+      }
+      
+      if (syncResult.filesDownloaded === 0) {
+        console.log(`[PreviewManager] No project files found, but continuing with basic structure`);
+      }
+      
+      // Start development server
+      await this.startDevServer(instance, type);
+      
+      instance.status = 'running';
+      console.log(`[PreviewManager] Preview ${instanceId} running at ${instance.url}`);
+      
+    } catch (error) {
+      console.error(`[PreviewManager] Failed to start preview ${instanceId}:`, error);
+      instance.status = 'error';
+      instance.errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      this.portManager.releasePort(port);
+    }
+
+    return instance;
+  }
+
+  async stopPreview(instanceId: string): Promise<void> {
+    const instance = this.instances.get(instanceId);
+    if (!instance) {
+      throw new Error('Preview instance not found');
+    }
+
+    console.log(`[PreviewManager] Stopping preview ${instanceId}`);
+    
+    // Kill the process if it exists
+    if (instance.process) {
+      instance.process.kill('SIGTERM');
+    }
+    
+    // Release the port
+    this.portManager.releasePort(instance.port);
+    
+    // Update status
+    instance.status = 'stopped';
+    
+    // Remove from instances
+    this.instances.delete(instanceId);
+  }
+
+  getPreview(instanceId: string): PreviewInstance | undefined {
+    console.log(`🔍 [PreviewManager] Looking for preview instance: ${instanceId}`);
+    console.log(`🔍 [PreviewManager] Total instances in memory: ${this.instances.size}`);
+    console.log(`🔍 [PreviewManager] Available instance IDs:`, Array.from(this.instances.keys()));
+    
+    const instance = this.instances.get(instanceId);
+    if (instance) {
+      console.log(`✅ [PreviewManager] Found instance: ${instanceId}, status: ${instance.status}`);
+      
+      // Check if process is actually alive when status is 'running'
+      if (instance.status === 'running' && instance.process) {
+        try {
+          // Check if process is still alive (will throw if process is dead)
+          process.kill(instance.process.pid, 0);
+          console.log(`✅ [PreviewManager] Process ${instance.process.pid} is alive`);
+        } catch (error) {
+          console.log(`💀 [PreviewManager] Process ${instance.process.pid} is dead, updating status to stopped`);
+          instance.status = 'stopped';
+        }
+      }
+      
+      instance.lastAccessed = new Date();
+    } else {
+      console.log(`❌ [PreviewManager] Instance not found: ${instanceId}`);
+    }
+    return instance;
+  }
+
+  getPreviewsForProject(projectId: string): PreviewInstance[] {
+    return Array.from(this.instances.values()).filter(
+      instance => instance.projectId === projectId
+    );
+  }
+
+  getAllPreviews(): PreviewInstance[] {
+    return Array.from(this.instances.values());
+  }
+
+  private async syncProjectFiles(projectId: string, localPath: string, req?: any): Promise<SyncResult> {
+    const path = require('path');
+    const { exec } = require('child_process');
+    const { promisify } = require('util');
+    const execAsync = promisify(exec);
+    const errors: string[] = [];
+    let filesDownloaded = 0;
+    
+    try {
+      // Ensure directory exists
+      await fsPromises.mkdir(localPath, { recursive: true });
+      
+      const { supabaseService, db } = getServices(req);
+    if (!supabaseService) {
+        console.log(`[PreviewManager] No Supabase service available, creating basic structure`);
+        await this.createBasicNextjsStructure(localPath, projectId);
+        return {
+          success: true,
+          filesDownloaded: 1, // Basic structure created
+          errors: [],
+          localPath
+        };
+      }
+
+      // Get project details to get Git repository info
+      const project = await db.getProjectById(projectId);
+      if (!project) {
+        console.log(`[PreviewManager] Project not found: ${projectId}, creating basic structure`);
+        await this.createBasicNextjsStructure(localPath, projectId);
+        return {
+          success: true,
+          filesDownloaded: 1, // Basic structure created
+          errors: [],
+          localPath
+        };
+      }
+
+      console.log(`[PreviewManager] Syncing files for project ${projectId} from Git repository`);
+
+      // Check if project has a Git repository
+      if (project.repoowner && project.reponame && project.repoprovider === 'github') {
+        console.log(`[PreviewManager] Using GitHub API for ${project.repoowner}/${project.reponame}`);
+        
+        try {
+          // Remove existing directory if it exists
+          try {
+            await fsPromises.rm(localPath, { recursive: true, force: true });
+            await fsPromises.mkdir(localPath, { recursive: true });
+          } catch (cleanupError) {
+            console.warn(`[PreviewManager] Cleanup warning: ${cleanupError}`);
+          }
+
+          // Download repository using GitHub API (no cloning required!)
+          const githubFileTreeService = createGitHubFileTreeService();
+          filesDownloaded = await githubFileTreeService.downloadRepositoryToPath(
+            project.repoowner,
+            project.reponame,
+            localPath
+          );
+          
+          console.log(`[PreviewManager] ✅ Downloaded repository via GitHub API with ${filesDownloaded} files`);
+          
+        } catch (githubApiError) {
+          console.error(`[PreviewManager] GitHub API download failed: ${githubApiError}`);
+          errors.push(`GitHub API download failed: ${githubApiError instanceof Error ? githubApiError.message : 'Unknown error'}`);
+          
+          // Fallback to basic structure
+          await this.createBasicNextjsStructure(localPath, projectId);
+          filesDownloaded = 1;
+        }
+        
+      } else {
+        console.log(`[PreviewManager] No Git repository configured for project ${projectId}, creating basic structure`);
+        await this.createBasicNextjsStructure(localPath, projectId);
+        filesDownloaded = 1;
+      }
+
+      console.log(`[PreviewManager] Successfully synced ${filesDownloaded} files to ${localPath}`);
+
+      return {
+        success: errors.length === 0,
+        filesDownloaded,
+        errors,
+        localPath
+      };
+      
+    } catch (error) {
+      const errorMsg = `File sync failed: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      console.error(`[PreviewManager] ${errorMsg}`);
+      errors.push(errorMsg);
+
+      return {
+        success: false,
+        filesDownloaded,
+        errors,
+        localPath
+      };
+    }
+  }
+
+  /**
+   * Get all files recursively from a path in Supabase Storage
+   */
+  private async getAllFilesRecursively(basePath: string, currentPath = ''): Promise<any[]> {
+    const fullPath = currentPath ? `${basePath}/${currentPath}` : basePath;
+    
+    try {
+      const { data, error } = await supabaseService!.storage
+        .from('project-files')
+        .list(fullPath, {
+          limit: 1000,
+          offset: 0
+        });
+        
+      if (error) {
+        console.error(`[PreviewManager] Failed to list files at ${fullPath}:`, error);
+        return [];
+      }
+      
+      let allFiles: any[] = [];
+      
+      for (const item of data || []) {
+        if (!item.name) continue;
+        
+        const itemPath = currentPath ? `${currentPath}/${item.name}` : item.name;
+        
+        // Add the current item with its path
+        allFiles.push({
+          ...item,
+          fullPath: itemPath
+        });
+        
+        // If this is a directory (no metadata means it's a folder), recursively get its contents
+        if (!item.id && !item.metadata) {
+          const childFiles = await this.getAllFilesRecursively(basePath, itemPath);
+          allFiles.push(...childFiles);
+        }
+      }
+      
+      return allFiles;
+    } catch (error) {
+      console.error(`[PreviewManager] Error in getAllFilesRecursively:`, error);
+      return [];
+    }
+  }
+
+  private async createBasicNextjsStructure(localPath: string, projectId: string): Promise<void> {
+    const path = require('path');
+
+    // Create package.json
+    const packageJson = {
+      name: `project-${projectId}`,
+      version: '0.1.0',
+      private: true,
+      scripts: {
+        dev: 'next dev',
+        build: 'next build',
+        start: 'next start'
+      },
+      dependencies: {
+        next: '^14.0.0',
+        react: '^18.0.0',
+        'react-dom': '^18.0.0'
+      }
+    };
+
+    await fsPromises.writeFile(
+      path.join(localPath, 'package.json'),
+      JSON.stringify(packageJson, null, 2)
+    );
+
+    // Create src/app structure
+    await fsPromises.mkdir(path.join(localPath, 'src', 'app'), { recursive: true });
+
+    // Create inspection overlay component
+    const inspectionOverlayContent = `'use client';
+    
+import { useEffect, useState } from 'react';
+
+interface InspectableElement {
+  id: string;
+  type: string;
+  text: string;
+  selector: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export default function InspectionOverlay() {
+  const [elements, setElements] = useState<InspectableElement[]>([]);
+  const [isInspectionMode, setIsInspectionMode] = useState(false);
+
+  useEffect(() => {
+    // Check if inspection mode is enabled via URL parameter
+    const urlParams = new URLSearchParams(window.location.search);
+    const inspectionEnabled = urlParams.get('inspection') === 'true';
+    setIsInspectionMode(inspectionEnabled);
+    
+    if (!inspectionEnabled) return;
+
+    const scanForElements = () => {
+      // Find interactive elements
+      const selectors = [
+        'button',
+        'input',
+        'a[href]',
+        'div[onclick]',
+        'nav',
+        'header',
+        'main',
+        'section',
+        '[role="button"]',
+        '.clickable'
+      ];
+      
+      const foundElements: InspectableElement[] = [];
+      
+      selectors.forEach(selector => {
+        const elements = document.querySelectorAll(selector);
+        elements.forEach((element, index) => {
+          if (element.classList.contains('inspection-overlay')) return; // Skip our own overlays
+          
+          const rect = element.getBoundingClientRect();
+          const computedStyle = window.getComputedStyle(element);
+          
+          // Only include visible elements with some size
+          if (rect.width > 0 && rect.height > 0 && computedStyle.display !== 'none') {
+            foundElements.push({
+              id: \`\${selector.replace(/[^a-zA-Z0-9]/g, '_')}_\${index}\`,
+              type: element.tagName.toLowerCase(),
+              text: element.textContent?.trim().substring(0, 50) || '',
+              selector: selector,
+              x: rect.left + window.scrollX,
+              y: rect.top + window.scrollY,
+              width: rect.width,
+              height: rect.height
+            });
+          }
+        });
+      });
+      
+      setElements(foundElements);
+    };
+
+    // Initial scan
+    scanForElements();
+    
+    // Rescan on resize or scroll
+    const handleRescan = () => setTimeout(scanForElements, 100);
+    window.addEventListener('resize', handleRescan);
+    window.addEventListener('scroll', handleRescan);
+    
+    return () => {
+      window.removeEventListener('resize', handleRescan);
+      window.removeEventListener('scroll', handleRescan);
+    };
+  }, []);
+
+  const handleElementClick = (element: InspectableElement) => {
+    // Post message to parent frame (if in iframe)
+    const message = {
+      type: 'INSPECTION_ELEMENT_CLICKED',
+      element: element
+    };
+    
+    if (window.parent !== window) {
+      window.parent.postMessage(message, '*');
+    }
+    
+    console.log('Inspection element clicked:', element);
+  };
+
+  if (!isInspectionMode || elements.length === 0) {
+    return null;
+  }
+
+  return (
+    <>
+      {elements.map((element) => (
+        <div
+          key={element.id}
+          className="inspection-overlay"
+          onClick={() => handleElementClick(element)}
+          style={{
+            position: 'absolute',
+            left: element.x,
+            top: element.y,
+            width: element.width,
+            height: element.height,
+            backgroundColor: 'rgba(59, 130, 246, 0.3)',
+            border: '2px solid rgb(59, 130, 246)',
+            cursor: 'pointer',
+            zIndex: 10000,
+            pointerEvents: 'auto',
+            transition: 'all 0.2s ease',
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 0.5)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 0.3)';
+          }}
+        >
+          <div
+            style={{
+              position: 'absolute',
+              bottom: '100%',
+              left: 0,
+              backgroundColor: 'rgb(59, 130, 246)',
+              color: 'white',
+              padding: '2px 6px',
+              fontSize: '12px',
+              borderRadius: '2px',
+              whiteSpace: 'nowrap',
+              maxWidth: '200px',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            }}
+          >
+            {element.type}: {element.text}
+          </div>
+        </div>
+      ))}
+    </>
+  );
+}`;
+
+    await fsPromises.writeFile(path.join(localPath, 'src', 'app', 'InspectionOverlay.tsx'), inspectionOverlayContent);
+
+    // Create layout.tsx with inspection support
+    const layoutContent = `import InspectionOverlay from './InspectionOverlay';
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>
+        {children}
+        <InspectionOverlay />
+      </body>
+    </html>
+  );
+}`;
+
+    await fsPromises.writeFile(path.join(localPath, 'src', 'app', 'layout.tsx'), layoutContent);
+
+    // Create page.tsx with interactive elements
+    const pageContent = `'use client';
+
+export default function Home() {
+  return (
+    <main style={{ padding: '2rem', textAlign: 'center' }}>
+      <h1>Project Preview</h1>
+      <p>Your project is running in preview mode!</p>
+      <button onClick={() => alert('Button clicked!')}>
+        Click me!
+      </button>
+      <nav style={{ marginTop: '2rem', padding: '1rem', backgroundColor: '#f3f4f6' }}>
+        <a href="#" style={{ marginRight: '1rem' }}>Home</a>
+        <a href="#" style={{ marginRight: '1rem' }}>About</a>
+        <a href="#" style={{ marginRight: '1rem' }}>Contact</a>
+      </nav>
+    </main>
+  );
+}`;
+
+    await fsPromises.writeFile(path.join(localPath, 'src', 'app', 'page.tsx'), pageContent);
+
+    // Create next.config.js
+    const nextConfig = `/** @type {import('next').NextConfig} */
+const nextConfig = {
+  reactStrictMode: true,
+}
+
+module.exports = nextConfig`;
+
+    await fsPromises.writeFile(path.join(localPath, 'next.config.js'), nextConfig);
+  }
+
+  private async ensureInspectionOverlay(localPath: string): Promise<void> {
+    const path = require('path');
+    
+    // Create InspectionOverlay.tsx in the app directory
+    const inspectionOverlayPath = path.join(localPath, 'app', 'InspectionOverlay.tsx');
+    const inspectionOverlayContent = `'use client';
+    
+import { useEffect, useState } from 'react';
+
+interface InspectableElement {
+  id: string;
+  type: string;
+  text: string;
+  selector: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export default function InspectionOverlay() {
+  const [elements, setElements] = useState<InspectableElement[]>([]);
+  const [isInspectionMode, setIsInspectionMode] = useState(false);
+
+  useEffect(() => {
+    // Check if inspection mode is enabled via URL parameter
+    const urlParams = new URLSearchParams(window.location.search);
+    const inspectionEnabled = urlParams.get('inspection') === 'true';
+    setIsInspectionMode(inspectionEnabled);
+    
+    if (!inspectionEnabled) return;
+
+    const scanForElements = () => {
+      // Find interactive elements
+      const selectors = [
+        'button',
+        'input',
+        'a[href]',
+        'div[onclick]',
+        'nav',
+        'header',
+        'main',
+        'section',
+        '[role="button"]',
+        '.clickable'
+      ];
+      
+      const foundElements: InspectableElement[] = [];
+      
+      selectors.forEach(selector => {
+        const elements = document.querySelectorAll(selector);
+        elements.forEach((element, index) => {
+          if (element.classList.contains('inspection-overlay')) return; // Skip our own overlays
+          
+          const rect = element.getBoundingClientRect();
+          const computedStyle = window.getComputedStyle(element);
+          
+          // Only include visible elements with some size
+          if (rect.width > 0 && rect.height > 0 && computedStyle.display !== 'none') {
+            foundElements.push({
+              id: \`\${selector.replace(/[^a-zA-Z0-9]/g, '_')}_\${index}\`,
+              type: element.tagName.toLowerCase(),
+              text: element.textContent?.trim().substring(0, 50) || '',
+              selector: selector,
+              x: rect.left + window.scrollX,
+              y: rect.top + window.scrollY,
+              width: rect.width,
+              height: rect.height
+            });
+          }
+        });
+      });
+      
+      setElements(foundElements);
+    };
+
+    // Initial scan
+    scanForElements();
+    
+    // Rescan on resize or scroll
+    const handleRescan = () => setTimeout(scanForElements, 100);
+    window.addEventListener('resize', handleRescan);
+    window.addEventListener('scroll', handleRescan);
+    
+    return () => {
+      window.removeEventListener('resize', handleRescan);
+      window.removeEventListener('scroll', handleRescan);
+    };
+  }, []);
+
+  const handleElementClick = (element: InspectableElement) => {
+    // Post message to parent frame (if in iframe)
+    const message = {
+      type: 'INSPECTION_ELEMENT_CLICKED',
+      element: element
+    };
+    
+    if (window.parent !== window) {
+      window.parent.postMessage(message, '*');
+    }
+    
+    console.log('Inspection element clicked:', element);
+  };
+
+  if (!isInspectionMode || elements.length === 0) {
+    return null;
+  }
+
+  return (
+    <>
+      {elements.map((element) => (
+        <div
+          key={element.id}
+          className="inspection-overlay"
+          onClick={() => handleElementClick(element)}
+          style={{
+            position: 'absolute',
+            left: element.x,
+            top: element.y,
+            width: element.width,
+            height: element.height,
+            backgroundColor: 'rgba(59, 130, 246, 0.3)',
+            border: '2px solid rgb(59, 130, 246)',
+            cursor: 'pointer',
+            zIndex: 10000,
+            pointerEvents: 'auto',
+            transition: 'all 0.2s ease',
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 0.5)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 0.3)';
+          }}
+        >
+          <div
+            style={{
+              position: 'absolute',
+              bottom: '100%',
+              left: 0,
+              backgroundColor: 'rgb(59, 130, 246)',
+              color: 'white',
+              padding: '2px 6px',
+              fontSize: '12px',
+              borderRadius: '2px',
+              whiteSpace: 'nowrap',
+              maxWidth: '200px',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            }}
+          >
+            {element.type}: {element.text}
+          </div>
+        </div>
+      ))}
+    </>
+  );
+}`;
+
+    try {
+      await fsPromises.mkdir(path.join(localPath, 'app'), { recursive: true });
+      await fsPromises.writeFile(inspectionOverlayPath, inspectionOverlayContent);
+      console.log(`[PreviewManager] Created InspectionOverlay.tsx`);
+    } catch (error) {
+      console.warn(`[PreviewManager] Failed to create InspectionOverlay.tsx:`, error);
+    }
+  }
+
+  private injectInspectionOverlay(layoutContent: string): string {
+    // Check if InspectionOverlay is already imported
+    if (layoutContent.includes('InspectionOverlay')) {
+      return layoutContent;
+    }
+    
+    try {
+      // Try to inject import and usage
+      let modifiedContent = layoutContent;
+      
+      // Add import after other imports
+      const lastImportMatch = modifiedContent.match(/^import.*$/gm);
+      if (lastImportMatch && lastImportMatch.length > 0) {
+        const lastImportLine = lastImportMatch[lastImportMatch.length - 1];
+        const lastImportIndex = modifiedContent.indexOf(lastImportLine) + lastImportLine.length;
+        modifiedContent = modifiedContent.slice(0, lastImportIndex) + 
+                         '\nimport InspectionOverlay from \'./InspectionOverlay\'' + 
+                         modifiedContent.slice(lastImportIndex);
+      }
+      
+      // Add component before closing </body> tag
+      modifiedContent = modifiedContent.replace(
+        '</body>',
+        '        <InspectionOverlay />\n      </body>'
+      );
+      
+      console.log(`[PreviewManager] Injected InspectionOverlay into layout.tsx`);
+      return modifiedContent;
+    } catch (error) {
+      console.warn(`[PreviewManager] Failed to inject InspectionOverlay:`, error);
+      return layoutContent;
+    }
+  }
+
+  private async startDevServer(instance: PreviewInstance, type: string): Promise<void> {
+    const { spawn } = require('child_process');
+    const path = require('path');
+
+    if (!instance.localPath) {
+      throw new Error('Local path not set');
+    }
+
+    // Detect package manager and install dependencies
+    console.log(`[PreviewManager] Installing dependencies for ${instance.id}`);
+    
+    const packageManager = await this.detectPackageManager(instance.localPath);
+    console.log(`[PreviewManager] Detected package manager: ${packageManager}`);
+    
+    // Clean up conflicting lock files if necessary
+    await this.cleanupLockFiles(instance.localPath, packageManager);
+    
+    const installCmd = packageManager === 'pnpm' ? 'pnpm' : 'npm';
+    
+    // Railway optimization: reduce resource usage during install
+    const isRailway = process.env.RAILWAY_ENVIRONMENT_NAME || process.env.RAILWAY_PROJECT_NAME;
+    let installArgs: string[];
+    
+    if (isRailway) {
+      console.log(`🚂 [PreviewManager] Railway environment detected - using optimized npm install`);
+      
+      // Remove existing lock file to prevent sync issues with templates
+      const lockFilePath = packageManager === 'pnpm' ? 
+        path.join(instance.localPath, 'pnpm-lock.yaml') : 
+        path.join(instance.localPath, 'package-lock.json');
+      
+      try {
+        if (fs.existsSync(lockFilePath)) {
+          console.log(`🗑️ [PreviewManager] Removing outdated lock file: ${lockFilePath}`);
+          fs.unlinkSync(lockFilePath);
+        }
+      } catch (error) {
+        console.warn(`⚠️ [PreviewManager] Could not remove lock file:`, error);
+      }
+      
+      // Use regular install but with optimizations to reduce resource usage
+      installArgs = packageManager === 'pnpm' ? 
+        ['install', '--prefer-offline'] : 
+        ['install', '--no-audit', '--no-fund', '--prefer-offline'];
+    } else {
+      installArgs = packageManager === 'pnpm' ? ['install'] : ['install'];
+    }
+    
+    console.log(`[PreviewManager] Running: ${installCmd} ${installArgs.join(' ')}`);
+    
+    const installProcess = spawn(installCmd, installArgs, {
+      cwd: instance.localPath,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        NODE_ENV: 'development', // Use development mode for package installation
+        // Railway optimizations
+        ...(isRailway && {
+          npm_config_audit: 'false',
+          npm_config_fund: 'false',
+          npm_config_optional: 'false'
+        })
+      }
+    });
+
+    await new Promise((resolve, reject) => {
+      let installOutput = '';
+      let installError = '';
+      
+      // Capture output for debugging
+      installProcess.stdout.on('data', (data: any) => {
+        installOutput += data.toString();
+        console.log(`[npm install] ${data.toString().trim()}`);
+      });
+      
+      installProcess.stderr.on('data', (data: any) => {
+        installError += data.toString();
+        console.error(`[npm install ERROR] ${data.toString().trim()}`);
+      });
+      
+      installProcess.on('close', (code: number | null) => {
+        console.log(`[PreviewManager] npm install completed with code: ${code}`);
+        if (code === 0) {
+          resolve(void 0);
+        } else {
+          const errorMsg = `npm install failed with code ${code}. Error: ${installError}. Output: ${installOutput}`;
+          console.error(`[PreviewManager] Install failure details: ${errorMsg}`);
+          reject(new Error(errorMsg));
+        }
+      });
+      
+      // Handle process termination (Railway killing it)
+      installProcess.on('error', (error: any) => {
+        console.error(`[PreviewManager] npm install process error:`, error);
+        reject(new Error(`npm install process error: ${error.message}`));
+      });
+    });
+
+    // Check if TypeScript is needed and install TypeScript dependencies
+    const tsconfigPath = `${instance.localPath}/tsconfig.json`;
+    
+    // Check for TypeScript files or tsconfig.json
+    let hasTypeScriptFiles = false;
+    try {
+      const files = fs.readdirSync(instance.localPath, { recursive: true });
+      hasTypeScriptFiles = Array.isArray(files) && files.some((file: string) => 
+        typeof file === 'string' && (file.endsWith('.ts') || file.endsWith('.tsx'))
+      );
+    } catch (e) {
+      console.error(`[PreviewManager] Error scanning for TypeScript files: ${e}`);
+    }
+    
+    const hasTsConfig = fs.existsSync(tsconfigPath);
+    const needsTypeScript = hasTsConfig || hasTypeScriptFiles;
+    
+    console.log(`[PreviewManager] TypeScript analysis for ${instance.id}:`);
+    console.log(`  - tsconfig.json exists: ${hasTsConfig}`);
+    console.log(`  - TypeScript files found: ${hasTypeScriptFiles}`);
+    console.log(`  - Needs TypeScript: ${needsTypeScript}`);
+    
+    // For Next.js projects, always install TypeScript dependencies as a safeguard
+    // since Next.js may auto-generate tsconfig.json and require TypeScript
+    const alwaysInstallTypeScript = type === 'nextjs';
+    console.log(`  - Force install for Next.js: ${alwaysInstallTypeScript}`);
+    
+    if (needsTypeScript || alwaysInstallTypeScript) {
+      console.log(`[PreviewManager] TypeScript detected, installing TypeScript dependencies for ${instance.id}`);
+      
+      // Check if TypeScript is already installed
+      const packageJsonPath = `${instance.localPath}/package.json`;
+      let needsTypeScript = true;
+      if (fs.existsSync(packageJsonPath)) {
+        try {
+          const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+          const hasTypeScript = (packageJson.dependencies?.typescript || packageJson.devDependencies?.typescript);
+          const hasTypesReact = (packageJson.dependencies?.['@types/react'] || packageJson.devDependencies?.['@types/react']);
+          const hasTypesNode = (packageJson.dependencies?.['@types/node'] || packageJson.devDependencies?.['@types/node']);
+          
+          if (hasTypeScript && hasTypesReact && hasTypesNode) {
+            console.log(`[PreviewManager] TypeScript dependencies already present in package.json for ${instance.id}`);
+            needsTypeScript = false;
+          }
+        } catch (e) {
+          console.error(`[PreviewManager] Error reading package.json for ${instance.id}:`, e);
+        }
+      }
+      
+      if (needsTypeScript) {
+        const tsInstallArgs = packageManager === 'yarn' 
+          ? ['add', '-D', 'typescript', '@types/react', '@types/node']
+          : packageManager === 'pnpm'
+          ? ['add', '-D', 'typescript', '@types/react', '@types/node'] 
+          : ['install', '--save-dev', 'typescript', '@types/react', '@types/node'];
+        
+        console.log(`[PreviewManager] Installing TypeScript with command: ${installCmd} ${tsInstallArgs.join(' ')}`);
+        
+        const tsInstallProcess = spawn(installCmd, tsInstallArgs, {
+          cwd: instance.localPath,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: {
+            ...process.env,
+            NODE_ENV: 'development' // Use development mode for TypeScript installation
+          }
+        });
+
+        // Log installation output
+        tsInstallProcess.stdout.on('data', (data: any) => {
+          console.log(`[PreviewManager] TypeScript install output: ${data.toString().trim()}`);
+        });
+
+        tsInstallProcess.stderr.on('data', (data: any) => {
+          console.error(`[PreviewManager] TypeScript install error: ${data.toString().trim()}`);
+        });
+
+        await new Promise((resolve, reject) => {
+          tsInstallProcess.on('close', (code: number) => {
+            if (code === 0) {
+              console.log(`[PreviewManager] TypeScript dependencies installed successfully for ${instance.id}`);
+              resolve(void 0);
+            } else {
+              console.error(`[PreviewManager] TypeScript dependency installation failed with code ${code} for ${instance.id}`);
+              reject(new Error(`TypeScript dependency installation failed with code ${code}`));
+            }
+          });
+        });
+      }
+    }
+
+    // Start dev server
+    console.log(`[PreviewManager] Starting dev server for ${instance.id} on port ${instance.port} using ${packageManager}`);
+    
+    const devCmd = packageManager === 'pnpm' ? 'pnpm' : (packageManager === 'yarn' ? 'yarn' : 'npm');
+    const devArgs = packageManager === 'yarn' ? ['dev'] : ['run', 'dev'];
+    
+    const devProcess = spawn(devCmd, devArgs, {
+      cwd: instance.localPath,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        NODE_ENV: 'development', // Force development mode for preview processes
+        PORT: instance.port.toString()
+      }
+    });
+
+    instance.process = devProcess;
+
+    // Wait for server to be ready
+    return new Promise((resolve, reject) => {
+      let output = '';
+      
+      const timeout = setTimeout(() => {
+        reject(new Error('Server startup timeout'));
+      }, 60000); // 60 second timeout
+
+      devProcess.stdout.on('data', (data: any) => {
+        output += data.toString();
+        console.log(`[Preview ${instance.id}]:`, data.toString().trim());
+        
+        // Check if server is ready
+        if (output.includes('Ready') || output.includes('ready') || output.includes(`localhost:${instance.port}`)) {
+          clearTimeout(timeout);
+          resolve(void 0);
+        }
+      });
+
+      devProcess.stderr.on('data', (data: any) => {
+        const errorMsg = data.toString().trim();
+        console.error(`[Preview ${instance.id} ERROR]:`, errorMsg);
+        
+        // Check for critical errors that should mark preview as failed
+        if (errorMsg.includes('FatalError') || errorMsg.includes('Cannot find module') || errorMsg.includes('EADDRINUSE')) {
+          console.error(`[Preview ${instance.id}] Critical error detected, marking as failed`);
+          instance.status = 'error';
+          instance.errorMessage = errorMsg;
+        }
+      });
+
+      devProcess.on('close', (code: number) => {
+        clearTimeout(timeout);
+        console.log(`[Preview ${instance.id}] Process exited with code: ${code}`);
+        
+        // Always update status when process exits, regardless of exit code
+        if (code !== 0) {
+          instance.status = 'error';
+          instance.errorMessage = `Dev server exited with code ${code}`;
+          reject(new Error(`Dev server exited with code ${code}`));
+        } else {
+          // Normal exit - mark as stopped
+          instance.status = 'stopped';
+          console.log(`[Preview ${instance.id}] Process stopped normally (exit code 0)`);
+          console.log(`[Preview ${instance.id}] This may indicate Railway resource limits or timeout policies`);
+        }
+      });
+
+      devProcess.on('error', (error: any) => {
+        clearTimeout(timeout);
+        console.error(`[Preview ${instance.id}] Process error:`, error);
+        instance.status = 'error';
+        instance.errorMessage = error.message;
+        reject(error);
+      });
+    });
+  }
+
+  /**
+   * Check if a command is available in the system
+   */
+  private async isCommandAvailable(command: string): Promise<boolean> {
+    try {
+      const { spawn } = require('child_process');
+      return new Promise((resolve) => {
+        const process = spawn(command, ['--version'], { stdio: 'ignore' });
+        process.on('close', (code: number | null) => {
+          resolve(code === 0);
+        });
+        process.on('error', () => {
+          resolve(false);
+        });
+        // Timeout after 5 seconds
+        setTimeout(() => {
+          process.kill();
+          resolve(false);
+        }, 5000);
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Detect which package manager to use based on lock files and command availability
+   */
+  private async detectPackageManager(projectPath: string): Promise<'npm' | 'pnpm' | 'yarn'> {
+    const path = require('path');
+    
+    // Check for pnpm-lock.yaml and if pnpm is available
+    try {
+      await fsPromises.access(path.join(projectPath, 'pnpm-lock.yaml'));
+      const isPnpmAvailable = await this.isCommandAvailable('pnpm');
+      if (isPnpmAvailable) {
+        console.log(`[PreviewManager] Detected pnpm (lock file found and command available)`);
+        return 'pnpm';
+      } else {
+        console.log(`[PreviewManager] pnpm-lock.yaml found but pnpm command not available, falling back to npm`);
+      }
+    } catch {}
+    
+    // Check for yarn.lock and if yarn is available
+    try {
+      await fsPromises.access(path.join(projectPath, 'yarn.lock'));
+      const isYarnAvailable = await this.isCommandAvailable('yarn');
+      if (isYarnAvailable) {
+        console.log(`[PreviewManager] Detected yarn (lock file found and command available)`);
+        return 'yarn';
+      } else {
+        console.log(`[PreviewManager] yarn.lock found but yarn command not available, falling back to npm`);
+      }
+    } catch {}
+    
+    // Default to npm (should always be available in Node.js environments)
+    console.log(`[PreviewManager] Using npm as default package manager`);
+    return 'npm';
+  }
+
+  /**
+   * Clean up conflicting lock files
+   */
+  private async cleanupLockFiles(projectPath: string, packageManager: 'npm' | 'pnpm' | 'yarn'): Promise<void> {
+    const path = require('path');
+    
+    try {
+      if (packageManager === 'pnpm') {
+        // Remove npm and yarn lock files if using pnpm
+        try {
+          await fsPromises.unlink(path.join(projectPath, 'package-lock.json'));
+          console.log(`[PreviewManager] Removed conflicting package-lock.json`);
+        } catch {}
+        try {
+          await fsPromises.unlink(path.join(projectPath, 'yarn.lock'));
+          console.log(`[PreviewManager] Removed conflicting yarn.lock`);
+        } catch {}
+        // Also remove node_modules to start fresh
+        try {
+          await fsPromises.rm(path.join(projectPath, 'node_modules'), { recursive: true, force: true });
+          console.log(`[PreviewManager] Removed existing node_modules`);
+        } catch {}
+      } else if (packageManager === 'yarn') {
+        // Remove npm and pnpm lock files if using yarn
+        try {
+          await fsPromises.unlink(path.join(projectPath, 'package-lock.json'));
+          console.log(`[PreviewManager] Removed conflicting package-lock.json`);
+        } catch {}
+        try {
+          await fsPromises.unlink(path.join(projectPath, 'pnpm-lock.yaml'));
+          console.log(`[PreviewManager] Removed conflicting pnpm-lock.yaml`);
+        } catch {}
+        // Also remove node_modules to start fresh
+        try {
+          await fsPromises.rm(path.join(projectPath, 'node_modules'), { recursive: true, force: true });
+          console.log(`[PreviewManager] Removed existing node_modules`);
+        } catch {}
+      } else {
+        // Using npm - remove other lock files
+        try {
+          await fsPromises.unlink(path.join(projectPath, 'pnpm-lock.yaml'));
+          console.log(`[PreviewManager] Removed conflicting pnpm-lock.yaml`);
+        } catch {}
+        try {
+          await fsPromises.unlink(path.join(projectPath, 'yarn.lock'));
+          console.log(`[PreviewManager] Removed conflicting yarn.lock`);
+        } catch {}
+        // Also remove node_modules to start fresh
+        try {
+          await fsPromises.rm(path.join(projectPath, 'node_modules'), { recursive: true, force: true });
+          console.log(`[PreviewManager] Removed existing node_modules`);
+        } catch {}
+      }
+    } catch (error) {
+      console.warn(`[PreviewManager] Error cleaning up lock files:`, error);
+    }
+  }
+}
+
+// Global preview manager instance
+const previewManager = new PreviewManager();
+
+// Import authentication middleware
+const { authenticateUser } = require('./middleware/auth');
+
+// Health checks
+router.get('/', (req: any, res: any) => {
+  res.status(200).json({
+    status: 'ok',
+    message: 'Unified Celiador Service is running',
+    timestamp: new Date().toISOString(),
+    port: port,
+    database: !!supabaseService,
+    jobQueue: { length: 0, processing: false }
+  });
+});
+
+router.get('/health', (req: any, res: any) => {
+  res.status(200).json({ status: 'ok' });
+});
+
+router.get('/healthz', (req: any, res: any) => {
+  res.status(200).send('OK');
+});
+
+// API status
+router.get('/api/status', (req: any, res: any) => {
+  res.json({ 
+    message: 'Unified Celiador API is running',
+    version: '1.0.0',
+    environment: process.env.NODE_ENV || 'development',
+    features: {
+      database: !!supabaseService,
+      jobProcessing: true
+    }
+  });
+});
+
+// Settings API endpoints
+router.get('/api/settings', authenticateUser, async (req: any, res: any) => {
+  try {
+    console.log('GET /api/settings - User:', req.user?.id);
+    
+    const { supabaseService, db } = getServices(req);
+    if (!supabaseService) {
+      console.log('No Supabase service available');
+      return res.status(500).json({ error: 'Database not available' });
+    }
+
+    const { data: settings, error } = await supabaseService
+      .from('user_settings')
+      .select('*')
+      .eq('user_id', req.user.id)
+      .is('deleted_at', null)
+      .single();
+
+    if (error && error.code !== 'PGRST116') { // PGRST116 = no rows found
+      console.error('Settings fetch error:', error);
+      return res.status(500).json({ error: 'Failed to fetch settings' });
+    }
+
+    // If no settings found, create default settings
+    if (!settings) {
+      const { data: newSettings, error: createError } = await supabaseService
+        .from('user_settings')
+        .insert({
+          user_id: req.user.id,
+          creator: req.user.id
+        })
+        .select()
+        .single();
+
+      if (createError) {
+        console.error('Settings creation error:', createError);
+        return res.status(500).json({ error: 'Failed to create settings' });
+      }
+
+      return res.json({ settings: newSettings });
+    }
+
+    res.json({ settings });
+  } catch (error) {
+    console.error('Settings API error:', error);
+    res.status(500).json({ error: 'Failed to fetch settings' });
+  }
+});
+
+router.put('/api/settings', authenticateUser, async (req: any, res: any) => {
+  try {
+    console.log('PUT /api/settings - User:', req.user?.id);
+    
+    const { supabaseService, db } = getServices(req);
+    if (!supabaseService) {
+      return res.status(500).json({ error: 'Database not available' });
+    }
+
+    const updates = req.body;
+    
+    // Remove system fields that shouldn't be updated directly
+    delete updates.id;
+    delete updates.user_id;
+    delete updates.creator;
+    delete updates.created_at;
+    delete updates.updated_at;
+
+    const { data: settings, error } = await supabaseService
+      .from('user_settings')
+      .update({
+        ...updates,
+        updater: req.user.id
+      })
+      .eq('user_id', req.user.id)
+      .is('deleted_at', null)
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Settings update error:', error);
+      return res.status(500).json({ error: 'Failed to update settings' });
+    }
+
+    res.json({ settings });
+  } catch (error) {
+    console.error('Settings update API error:', error);
+    res.status(500).json({ error: 'Failed to update settings' });
+  }
+});
+
+router.delete('/api/settings', authenticateUser, async (req: any, res: any) => {
+  try {
+    console.log('DELETE /api/settings - User:', req.user?.id);
+    
+    const { supabaseService, db } = getServices(req);
+    if (!supabaseService) {
+      return res.status(500).json({ error: 'Database not available' });
+    }
+
+    // Reset to defaults by creating new settings row
+    const { data: settings, error } = await supabaseService
+      .from('user_settings')
+      .update({
+        deleter: req.user.id,
+        deleted_at: new Date().toISOString()
+      })
+      .eq('user_id', req.user.id)
+      .is('deleted_at', null);
+
+    if (error) {
+      console.error('Settings delete error:', error);
+      return res.status(500).json({ error: 'Failed to reset settings' });
+    }
+
+    // Create new default settings
+    const { data: newSettings, error: createError } = await supabaseService
+      .from('user_settings')
+      .insert({
+        user_id: req.user.id,
+        creator: req.user.id
+      })
+      .select()
+      .single();
+
+    if (createError) {
+      console.error('Settings creation error:', createError);
+      return res.status(500).json({ error: 'Failed to create default settings' });
+    }
+
+    res.json({ settings: newSettings });
+  } catch (error) {
+    console.error('Settings reset API error:', error);
+    res.status(500).json({ error: 'Failed to reset settings' });
+  }
+});
+
+// Projects endpoints
+// EXTRACTED to routes/projects.ts
+
+router.post('/projects', authenticateUser, async (req: any, res: any) => {
+  console.log(`🚀 [CREATE PROJECT] Request received:`, {
+    name: req.body.name,
+    templateKey: req.body.templateKey,
+    userId: req.user?.id,
+    timestamp: new Date().toISOString()
+  });
+  
+  try {
+    const { name, templateKey, repo, createGitHubRepo } = req.body;
+
+    if (!name) {
+      return res.status(400).json({ error: 'Project name is required' });
+    }
+
+    // Check for duplicate project names for this user
+    console.log(`🔍 [CREATE PROJECT] Checking for duplicate project name: "${name}"`);
+    const { data: existingProjects, error: duplicateCheckError } = await supabaseService
+      .from('projects')
+      .select('id, name')
+      .eq('userid', req.user.id)
+      .eq('name', name)
+      .is('deletedAt', null);
+    
+    if (duplicateCheckError) {
+      console.error('[CREATE PROJECT] Failed to check for duplicate names:', duplicateCheckError);
+      return res.status(500).json({ error: 'Failed to validate project name' });
+    }
+    
+    if (existingProjects && existingProjects.length > 0) {
+      console.log(`❌ [CREATE PROJECT] Duplicate project name found: "${name}"`);
+      return res.status(400).json({ 
+        error: 'Project name already exists',
+        details: `You already have a project named "${name}". Please choose a different name.`
+      });
+    }
+    
+    console.log(`✅ [CREATE PROJECT] Project name "${name}" is available`);
+
+    const defaultRepoName = name.toLowerCase()
+      .replace(/[^a-z0-9\\s-]/g, '')
+      .replace(/\\s+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+    
+    const finalTemplateKey = templateKey || 'blank-nextjs';
+    const shouldCreateRepo = createGitHubRepo !== false; // Default to true
+    const repoOwner = repo?.owner || 'celiador-repos'; // Use organization
+    const repoName = repo?.name || defaultRepoName;
+    
+    console.log(`🚀 [CREATE PROJECT] Creating project in database...`);
+    
+    const project = await Promise.race([
+      db.createProject({
+        name,
+        templateKey: finalTemplateKey,
+        repoProvider: shouldCreateRepo ? 'github' : null,
+        repoOwner: shouldCreateRepo ? repoOwner : null,
+        repoName: shouldCreateRepo ? repoName : null,
+        repoUrl: null, // Will be set by GitHub repo creation job
+        repoCreated: false,
+        userId: req.user.id
+      }),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Database operation timeout after 30 seconds')), 30000)
+      )
+    ]);
+
+    console.log(`✅ [CREATE PROJECT] Project created: ${project.id} with template: ${finalTemplateKey}`);
+
+    // Store scaffold job data for processing after GitHub repo creation
+    let scaffoldJobForLater = null;
+
+    // Auto-scaffold with template - prepare job but don't queue yet
+    if (finalTemplateKey) {
+      try {
+        const job = await db.createJob({
+          projectId: project.id,
+          userId: req.user.id,
+          type: 'SCAFFOLD',
+          prompt: `Initialize project with ${finalTemplateKey} template`
+        });
+
+        const jobData = {
+          id: job.id,
+          projectId: project.id,
+          userId: req.user.id,
+          type: 'SCAFFOLD',
+          templateKey: finalTemplateKey,
+          repo: repo || {
+            provider: 'github',
+            owner: 'user',
+            name: defaultRepoName
+          }
+        };
+
+        // Store scaffold job data for later (after GitHub repo creation)
+        scaffoldJobForLater = jobData;
+        console.log(`Scaffold job ${job.id} created, waiting for GitHub repo creation`);
+      } catch (scaffoldError) {
+        console.error('Failed to enqueue scaffold job:', scaffoldError);
+      }
+    }
+
+    // Create GitHub repository if requested - MUST happen before scaffold
+    if (shouldCreateRepo) {
+      try {
+        const githubJob = await db.createJob({
+          projectId: project.id,
+          userId: req.user.id,
+          type: 'GITHUB_REPO_CREATE',
+          prompt: `Create GitHub repository: ${repoOwner}/${repoName}`
+        });
+
+        const githubJobData = {
+          id: githubJob.id,
+          projectId: project.id,
+          userId: req.user.id,
+          type: 'GITHUB_REPO_CREATE',
+          repoName: repoName,
+          repoOwner: repoOwner,
+          projectName: name
+        };
+
+        // Add GitHub repo creation to queue FIRST
+        const { jobService } = getServices(req);
+        jobService.addJob(githubJobData);
+        console.log(`GitHub repo creation job ${githubJob.id} queued successfully`);
+        
+        // Now add scaffold job AFTER GitHub repo creation
+        if (scaffoldJobForLater) {
+          jobService.addJob(scaffoldJobForLater);
+          console.log(`Scaffold job ${scaffoldJobForLater.id} queued successfully (after GitHub repo creation)`);
+        }
+      } catch (githubError) {
+        console.error('Failed to enqueue GitHub repo creation job:', githubError);
+      }
+    } else if (scaffoldJobForLater) {
+      // If no GitHub repo needed, queue scaffold job directly
+      const { jobService } = getServices(req);
+      jobService.addJob(scaffoldJobForLater);
+      console.log(`Scaffold job ${scaffoldJobForLater.id} queued successfully (no GitHub repo needed)`);
+    }
+
+    console.log(`📤 [CREATE PROJECT] Sending response for project: ${project.id}`);
+    res.status(201).json(project);
+    console.log(`✅ [CREATE PROJECT] Response sent successfully`);
+  } catch (error) {
+    console.error('❌ [CREATE PROJECT] Failed to create project:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Failed to create project';
+    res.status(500).json({ error: errorMessage });
+    console.log(`💀 [CREATE PROJECT] Error response sent: ${errorMessage}`);
+  }
+});
+
+router.get('/projects/:id', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const project = await db.getProjectById(id);
+    
+    if (!project) {
+      return res.status(404).json({ error: 'Project not found' });
+    }
+
+    if (project.userid !== req.user.id) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    res.json(project);
+  } catch (error) {
+    console.error('Failed to fetch project:', error);
+    res.status(500).json({ error: 'Failed to fetch project' });
+  }
+});
+
+router.delete('/projects/:id', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const project = await db.getProjectById(id);
+    
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    // Soft delete the project
+    if (supabaseService) {
+      await supabaseService
+        .from('projects')
+        .update({ 
+          deletedAt: new Date().toISOString(),
+          updatedat: new Date().toISOString()
+        })
+        .eq('id', id)
+        .eq('userid', req.user.id);
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Project delete error:', error);
+    res.status(500).json({ error: 'Failed to delete project' });
+  }
+});
+
+// Job endpoints
+
+
+
+
+
+// Conversation endpoints
+router.get('/projects/:id/conversations', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    
+    // Get services from req
+    const { supabaseService, db } = getServices(req);
+    if (!db) {
+      return res.status(500).json({ error: 'Database service not available' });
+    }
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    try {
+      const conversations = await db.getConversationsByProjectId(id, req.user.id);
+      res.json(conversations);
+    } catch (error) {
+      // Conversations table might not exist
+      console.log('Conversations table does not exist, returning empty array');
+      res.json([]);
+    }
+  } catch (error) {
+    console.error('Failed to get conversations:', error);
+    res.status(500).json({ error: 'Failed to get conversations' });
+  }
+});
+
+router.post('/projects/:id/conversations', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const { title } = req.body;
+    
+    // Get services from req
+    const { supabaseService, db } = getServices(req);
+    if (!db) {
+      return res.status(500).json({ error: 'Database service not available' });
+    }
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    try {
+      const conversation = await db.createConversation({
+        title: title || 'New Conversation',
+        projectId: id,
+        userId: req.user.id
+      });
+      
+      res.status(201).json(conversation);
+    } catch (error) {
+      console.error('Failed to create conversation (table may not exist):', error);
+      res.status(500).json({ error: 'Conversations feature not available' });
+    }
+  } catch (error) {
+    console.error('Failed to create conversation:', error);
+    res.status(500).json({ error: 'Failed to create conversation' });
+  }
+});
+
+// Chat endpoint for AI conversations
+router.post('/projects/:id/chat', authenticateUser, async (req: any, res: any) => {
+  const { id: projectId } = req.params;
+  const { message, conversationId, history, provider = 'openai' } = req.body;
+  
+  try {
+    console.log(`[Chat] Processing message for project ${projectId}, conversation ${conversationId}`);
+    console.log(`[Chat] Message length: ${message?.length || 0}, History length: ${history?.length || 0}`);
+    
+    // Get services from req
+    const { supabaseService, db } = getServices(req);
+    if (!db) {
+      throw new Error('Database service not available');
+    }
+    
+    if (!aiService.isAvailable()) {
+      throw new Error('AI service not available - check API keys in environment variables');
+    }
+    
+    // Get project details for context
+    console.log(`[Chat] Fetching project details for context...`);
+    const project = await db.getProjectById(projectId);
+    
+    // Get project files for context
+    console.log(`[Chat] Fetching project files for context...`);
+    const projectFiles = await getProjectFilesForAI(projectId, req.user.id, { supabaseService, db });
+    console.log(`[Chat] Found ${Object.keys(projectFiles.file_contents).length} project files`);
+    
+    // Build conversation messages for AI
+    const messages: any[] = [];
+    
+    // Add system prompt with project context including files
+    let projectDescription = 'A Next.js project with Celiador inspection capabilities';
+    if (project && project.repoowner && project.reponame) {
+      projectDescription = `GitHub repository: ${project.repoowner}/${project.reponame}. The user is inspecting and modifying UI elements in this repository using Celiador's visual inspection system.`;
+    }
+    
+    const systemPrompt = aiService.createDevelopmentSystemPrompt({
+      name: project?.name || `Project ${projectId}`,
+      description: projectDescription,
+      tech_stack: ['Next.js', 'React', 'TypeScript', 'Tailwind CSS'],
+      current_files: projectFiles.current_files,
+      file_contents: projectFiles.file_contents
+    });
+    messages.push({ role: 'system', content: systemPrompt });
+    
+    // Add conversation history
+    if (history && Array.isArray(history)) {
+      messages.push(...history);
+    }
+    
+    // Add current user message
+    messages.push({ role: 'user', content: message });
+    
+    console.log(`[Chat] Calling AI service with ${messages.length} messages`);
+    
+    // Get AI response
+    const aiResult = await aiService.generateResponse(messages, { provider });
+    
+    // Parse actions from response
+    const parsedActions = aiService.parseActionsFromResponse(aiResult.content);
+    
+    let jobId = null;
+    
+    // Create file operation jobs if actions are detected
+    if (parsedActions.hasActions && parsedActions.actions.length > 0) {
+      console.log(`[Chat] Creating jobs for ${parsedActions.actions.length} file operations`);
+      
+      if (parsedActions.actions.length === 1) {
+        // Single file operation
+        const action = parsedActions.actions[0];
+        // Map AI action type to job type
+        const jobType = action.type === 'create_file' ? 'FILE_CREATE' :
+                       action.type === 'update_file' ? 'FILE_UPDATE' :
+                       action.type === 'delete_file' ? 'FILE_DELETE' : 'FILE_UPDATE';
+        
+        const job = await db.createJob({
+          userId: req.user.id,
+          projectId,
+          type: jobType,
+          status: 'PENDING',
+          metadata: {
+            filePath: action.path,
+            content: action.content,
+            actionType: action.type,
+            conversationId
+          }
+        });
+        
+        const jobData = {
+          ...job,
+          userId: req.user.id,
+          projectId,
+          filePath: action.path,
+          content: action.content
+        };
+        
+        const { jobService } = getServices(req);
+        jobService.addJob(jobData);
+        jobId = job.id;
+        console.log(`[Chat] Single file operation job ${job.id} created and queued`);
+        
+      } else {
+        // Batch file operations
+        const job = await db.createJob({
+          userId: req.user.id,
+          projectId,
+          type: 'FILE_BATCH',
+          status: 'PENDING',
+          metadata: {
+            operations: parsedActions.actions,
+            conversationId
+          }
+        });
+        
+        const jobData = {
+          ...job,
+          userId: req.user.id,
+          projectId,
+          operations: parsedActions.actions
+        };
+        
+        const { jobService } = getServices(req);
+        jobService.addJob(jobData);
+        jobId = job.id;
+        console.log(`[Chat] Batch file operation job ${job.id} created and queued with ${parsedActions.actions.length} operations`);
+      }
+    }
+    
+    const aiResponse = {
+      response: aiResult.content,
+      actions: parsedActions.hasActions ? {
+        detected: parsedActions.actions,
+        jobId
+      } : null,
+      conversationId,
+      timestamp: new Date().toISOString(),
+      usage: aiResult.usage
+    };
+    
+    console.log(`[Chat] AI response generated: ${aiResult.content.length} chars, ${parsedActions.actions.length} actions, job: ${jobId}`);
+    res.json(aiResponse);
+    
+  } catch (error: any) {
+    console.error(`Failed to process chat message for project ${projectId}:`, error);
+    res.status(500).json({ 
+      error: 'Failed to process chat message',
+      details: error.message 
+    });
+  }
+});
+
+// Backup management endpoints
+router.get('/projects/:id/backups', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id: projectId } = req.params;
+    const { limit = 50 } = req.query;
+    
+    if (!backupService) {
+      return res.status(500).json({ error: 'Backup service not available' });
+    }
+    
+    const backups = await backupService.getBackupHistory(
+      projectId,
+      req.user.id,
+      parseInt(limit)
+    );
+    
+    res.json({ backups });
+  } catch (error: any) {
+    console.error('Failed to fetch backup history:', error);
+    res.status(500).json({ error: 'Failed to fetch backup history' });
+  }
+});
+
+router.post('/backups/:id/restore', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id: backupId } = req.params;
+    
+    if (!backupService) {
+      return res.status(500).json({ error: 'Backup service not available' });
+    }
+    
+    const result = await backupService.restoreFromBackup(backupId, req.user.id);
+    
+    // Trigger file refresh for the restored file
+    // (This would normally be done through WebSocket or similar mechanism)
+    
+    res.json({ 
+      success: true,
+      message: `File ${result.filePath} restored successfully`,
+      filePath: result.filePath,
+      projectId: result.projectId
+    });
+  } catch (error: any) {
+    console.error('Failed to restore backup:', error);
+    res.status(500).json({ error: error.message || 'Failed to restore backup' });
+  }
+});
+
+router.post('/projects/:id/backups/cleanup', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id: projectId } = req.params;
+    const { keepCount = 10 } = req.body;
+    
+    if (!backupService) {
+      return res.status(500).json({ error: 'Backup service not available' });
+    }
+    
+    const deletedCount = await backupService.cleanupOldBackups(
+      projectId,
+      req.user.id,
+      keepCount
+    );
+    
+    res.json({ 
+      success: true,
+      message: `Cleaned up ${deletedCount} old backups`,
+      deletedCount
+    });
+  } catch (error: any) {
+    console.error('Failed to cleanup backups:', error);
+    res.status(500).json({ error: 'Failed to cleanup backups' });
+  }
+});
+
+// Helper function to get GitHub project files for AI context
+async function getGitHubProjectFilesForAI(owner: string, repo: string): Promise<{
+  current_files: string[];
+  file_contents: { [key: string]: string };
+}> {
+  try {
+    console.log(`[Chat] Fetching GitHub repository files: ${owner}/${repo}`);
+    
+    const fileTree = await githubService.getFileTree(owner, repo);
+    console.log(`[Chat] GitHub file tree contains ${fileTree.length} items`);
+    
+    // Filter to important file types for AI context
+    const importantFiles = fileTree.filter(file => {
+      const filePath = file.path;
+      return (
+        filePath.endsWith('.tsx') ||
+        filePath.endsWith('.ts') ||
+        filePath.endsWith('.jsx') ||
+        filePath.endsWith('.js') ||
+        filePath.endsWith('.json') ||
+        filePath.includes('layout') ||
+        filePath.includes('page') ||
+        filePath.includes('component') ||
+        filePath === 'package.json' ||
+        filePath === 'tailwind.config.js' ||
+        filePath === 'next.config.js' ||
+        filePath.endsWith('.css') ||
+        filePath.endsWith('.scss')
+      );
+    }).slice(0, 20); // Limit to 20 most important files
+    
+    console.log(`[Chat] Downloading ${importantFiles.length} important GitHub files for AI context`);
+    
+    const fileContents: { [key: string]: string } = {};
+    const currentFiles: string[] = [];
+    
+    // Download file contents in parallel (but limit concurrency)
+    const downloadPromises = importantFiles.map(async (file) => {
+      try {
+        const content = await githubService.getFileContent(owner, repo, file.path);
+        fileContents[file.path] = content;
+        currentFiles.push(file.path);
+        console.log(`[Chat] Downloaded GitHub file: ${file.path} (${content.length} chars)`);
+      } catch (error) {
+        console.warn(`[Chat] Failed to download GitHub file ${file.path}:`, error);
+      }
+    });
+    
+    // Wait for all downloads with a reasonable timeout
+    await Promise.allSettled(downloadPromises);
+    
+    console.log(`[Chat] Successfully loaded ${Object.keys(fileContents).length} GitHub files for AI context`);
+    return { current_files: currentFiles, file_contents: fileContents };
+    
+  } catch (error) {
+    console.error(`[Chat] Error fetching GitHub project files:`, error);
+    throw error; // Re-throw to allow fallback to Supabase storage
+  }
+}
+
+// Helper function to get project files for AI context
+async function getProjectFilesForAI(projectId: string, userId: string, services: { supabaseService: any, db: any }): Promise<{
+  current_files: string[];
+  file_contents: { [key: string]: string };
+}> {
+  try {
+    const { supabaseService, db } = services;
+    // First, check if this project has GitHub repository information
+    console.log(`[Chat] Checking project ${projectId} for GitHub repository context...`);
+    const project = await db.getProjectById(projectId);
+    
+    if (project && project.repoowner && project.reponame) {
+      console.log(`[Chat] Project has GitHub repository: ${project.repoowner}/${project.reponame}`);
+      console.log(`[Chat] Using GitHub API to fetch files instead of Supabase storage`);
+      
+      try {
+        return await getGitHubProjectFilesForAI(project.repoowner, project.reponame);
+      } catch (githubError) {
+        console.warn(`[Chat] Failed to fetch from GitHub, falling back to Supabase storage:`, githubError);
+        // Fall through to Supabase storage approach
+      }
+    } else {
+      console.log(`[Chat] Project has no GitHub repository, using Supabase storage`);
+    }
+    
+    // Use the correct path pattern from bucket exploration: userId/projectId
+    console.log(`[Chat] Using discovered path pattern: ${userId}/${projectId}`);
+    const basePath = `${userId}/${projectId}`;
+    console.log(`[Chat] Looking for files at: ${basePath}`);
+    
+    // Get all files using the correct path
+    const allFiles = await getAllFilesRecursivelyForAI(basePath, '', supabaseService);
+    console.log(`[Chat] Found ${allFiles.length} files at: ${basePath}`);
+    
+    if (allFiles.length === 0) {
+      console.log(`[Chat] No files found in any path pattern, exploring root bucket...`);
+      
+      // Explore the bucket structure to understand what's actually there
+      try {
+        const { data: rootFiles, error: rootError } = await supabaseService!.storage
+          .from('project-files')
+          .list('', { limit: 100 });
+        
+        if (!rootError && rootFiles) {
+          console.log(`[Chat] Root bucket contains ${rootFiles.length} items:`, rootFiles.map((f: any) => f.name));
+          
+          // Try to find any folder that might contain our project
+          for (const rootItem of rootFiles) {
+            if (rootItem.name && !rootItem.id) { // It's a folder
+              console.log(`[Chat] Exploring folder: ${rootItem.name}`);
+              const { data: folderFiles, error: folderError } = await supabaseService!.storage
+                .from('project-files')
+                .list(rootItem.name, { limit: 50 });
+              
+              if (!folderError && folderFiles) {
+                console.log(`[Chat] Folder ${rootItem.name} contains:`, folderFiles.map((f: any) => f.name));
+              }
+            }
+          }
+        }
+      } catch (explorationError) {
+        console.error(`[Chat] Error exploring bucket:`, explorationError);
+      }
+      
+      return { current_files: [], file_contents: {} };
+    }
+    
+    const fileContents: { [key: string]: string } = {};
+    const currentFiles: string[] = [];
+    
+    // Download and read key project files (limit to important ones for AI context)
+    const importantFiles = allFiles.filter(file => {
+      const filePath = file.fullPath || file.name;
+      return (
+        filePath.endsWith('.tsx') ||
+        filePath.endsWith('.ts') ||
+        filePath.endsWith('.jsx') ||
+        filePath.endsWith('.js') ||
+        filePath.endsWith('.json') ||
+        filePath.includes('layout') ||
+        filePath.includes('page') ||
+        filePath.includes('component') ||
+        filePath === 'package.json' ||
+        filePath === 'tailwind.config.js' ||
+        filePath === 'next.config.js'
+      );
+    }).slice(0, 15); // Limit to 15 most important files
+    
+    console.log(`[Chat] Downloading ${importantFiles.length} important files for AI context`);
+    
+    for (const file of importantFiles) {
+      // Skip directories
+      if (!file.id && !file.metadata) {
+        continue;
+      }
+      
+      const filePath = file.fullPath || file.name;
+      try {
+        const { data: fileData, error: downloadError } = await supabaseService!.storage
+          .from('project-files')
+          .download(`${basePath}/${filePath}`);
+          
+        if (!downloadError && fileData) {
+          const content = await fileData.text();
+          fileContents[filePath] = content;
+          currentFiles.push(filePath);
+          console.log(`[Chat] Downloaded: ${filePath} (${content.length} chars)`);
+        } else {
+          console.warn(`[Chat] Failed to download ${filePath}:`, downloadError?.message);
+        }
+      } catch (fileError) {
+        console.warn(`[Chat] Error downloading ${filePath}:`, fileError);
+      }
+    }
+    
+    console.log(`[Chat] Successfully loaded ${Object.keys(fileContents).length} files for AI context`);
+    return { current_files: currentFiles, file_contents: fileContents };
+    
+  } catch (error) {
+    console.error(`[Chat] Error fetching project files:`, error);
+    return { current_files: [], file_contents: {} };
+  }
+}
+
+// Get all files recursively for AI context (reuse PreviewManager logic)
+async function getAllFilesRecursivelyForAI(basePath: string, currentPath = '', supabaseService: any): Promise<any[]> {
+  const fullPath = currentPath ? `${basePath}/${currentPath}` : basePath;
+  
+  try {
+    console.log(`[Chat] Listing files at: ${fullPath}`);
+    const { data, error } = await supabaseService.storage
+      .from('project-files')
+      .list(fullPath, {
+        limit: 1000,
+        offset: 0
+      });
+      
+    if (error) {
+      console.error(`[Chat] Failed to list files at ${fullPath}:`, error);
+      return [];
+    }
+    
+    console.log(`[Chat] Found ${data?.length || 0} items at ${fullPath}:`, data?.map((item: any) => `${item.name} (id: ${item.id})`));
+    
+    let allFiles: any[] = [];
+    
+    for (const item of data || []) {
+      if (!item.name) continue;
+      
+      const itemPath = currentPath ? `${currentPath}/${item.name}` : item.name;
+      
+      // Add the current item with its path
+      allFiles.push({
+        ...item,
+        fullPath: itemPath
+      });
+      
+      // If this is a directory (no metadata means it's a folder), recursively get its contents
+      if (!item.id && !item.metadata) {
+        console.log(`[Chat] Recursing into directory: ${itemPath}`);
+        const childFiles = await getAllFilesRecursivelyForAI(basePath, itemPath, supabaseService);
+        allFiles.push(...childFiles);
+      }
+    }
+    
+    return allFiles;
+  } catch (error) {
+    console.error(`[Chat] Error in getAllFilesRecursivelyForAI:`, error);
+    return [];
+  }
+}
+
+router.get('/conversations/:id/messages', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    
+    // Get services from req
+    const { supabaseService, db } = getServices(req);
+    if (!db) {
+      return res.status(500).json({ error: 'Database service not available' });
+    }
+    
+    try {
+      const messages = await db.getMessagesByConversationId(id);
+      res.json(messages);
+    } catch (error) {
+      // Messages table might not exist
+      console.log('Messages table does not exist, returning empty array');
+      res.json([]);
+    }
+  } catch (error) {
+    console.error('Failed to get messages:', error);
+    res.status(500).json({ error: 'Failed to get messages' });
+  }
+});
+
+router.post('/conversations/:id/messages', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const { content, role, messageType, metadata, parentId, relatedJobId } = req.body;
+    
+    if (!content || !role) {
+      return res.status(400).json({ error: 'Content and role are required' });
+    }
+
+    // Get services from req
+    const { supabaseService, db } = getServices(req);
+    if (!db) {
+      return res.status(500).json({ error: 'Database service not available' });
+    }
+
+    try {
+      const message = await db.createMessage({
+        content,
+        role,
+        messageType: messageType || 'text',
+        conversationId: id,
+        userId: req.user.id,
+        metadata,
+        parentId,
+        relatedJobId
+      });
+      
+      res.status(201).json(message);
+    } catch (error) {
+      console.error('Failed to create message (table may not exist):', error);
+      res.status(500).json({ error: 'Messages feature not available' });
+    }
+  } catch (error) {
+    console.error('Failed to create message:', error);
+    res.status(500).json({ error: 'Failed to create message' });
+  }
+});
+
+// Templates endpoint - Enhanced with Git validation
+router.get('/templates', async (req: any, res: any) => {
+  try {
+    const { supabaseService, db } = getServices(req);
+    if (!supabaseService) {
+      return res.status(500).json({ error: 'Database not available' });
+    }
+
+    // Use GitTemplateService for validated template fetching
+    const { GitTemplateService } = require('./git-template-service');
+    const gitTemplateService = new GitTemplateService(supabaseService);
+    
+    console.log('[Templates] Fetching available templates...');
+    const templates = await gitTemplateService.getAvailableTemplates();
+    
+    console.log(`[Templates] ✅ Returning ${templates.length} active templates`);
+    res.json({ templates: templates || [] });
+  } catch (error) {
+    console.error('Failed to get templates:', error);
+    
+    // Fallback to direct database query if GitTemplateService fails
+    try {
+      console.log('[Templates] Falling back to direct database query...');
+      const { data: templates, error: dbError } = await supabaseService
+        .from('templates')
+        .select('*')
+        .eq('is_active', true)
+        .order('rating', { ascending: false });
+
+      if (dbError) {
+        throw dbError;
+      }
+      
+      console.log(`[Templates] ⚠️ Fallback returned ${templates?.length || 0} templates`);
+      res.json({ templates: templates || [] });
+    } catch (fallbackError) {
+      console.error('Templates fallback also failed:', fallbackError);
+      res.status(500).json({ error: 'Failed to get templates' });
+    }
+  }
+});
+
+// Activity stream endpoint
+router.get('/projects/:id/activity', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const { showAll } = req.query;
+    const { supabaseService, db } = getServices(req);
+    
+    console.log(`[ACTIVITY] NEW REQUEST for project ${id}, showAll: ${showAll}, time: ${new Date().toISOString()}`);
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+    
+    console.log('[DEBUG] Project createdat:', project.createdat);
+
+    if (!supabaseService) {
+      return res.json([]);
+    }
+
+    // Get comprehensive activity from multiple sources
+    const limit = showAll === 'true' ? 50 : 10;
+    
+    // Get jobs activity - order by updatedat first, then createdat
+    const { data: jobs, error: jobsError } = await supabaseService
+      .from('jobs')
+      .select('id, type, status, createdat, updatedat, prompt, output, error, metadata, userid')
+      .eq('projectid', id)
+      .order('updatedat', { ascending: false, nullsLast: true })
+      .order('createdat', { ascending: false })
+      .limit(limit);
+
+    if (jobsError) {
+      console.error('Error fetching jobs for activity:', jobsError);
+      return res.status(500).json({ error: 'Failed to get activity' });
+    }
+
+    console.log(`[DEBUG] Found ${jobs?.length || 0} jobs for project ${id}`);
+    console.log('[DEBUG] Jobs with timestamps:');
+    jobs?.forEach((job: any, i: number) => {
+      console.log(`  Job ${i}: ${job.type} - created: ${job.createdat}, updated: ${job.updatedat}`);
+    });
+
+    // Get conversation activity if conversations exist
+    let conversationActivities = [];
+    try {
+      const { data: conversations } = await supabaseService
+        .from('conversations')
+        .select('id, title, createdat, updatedat')
+        .eq('projectId', id)
+        .is('deletedAt', null)
+        .order('createdat', { ascending: false })
+        .limit(5);
+      
+      conversationActivities = conversations?.map((conv: any) => ({
+        id: `conv_${conv.id}`,
+        type: 'conversation',
+        title: 'Conversation started',
+        description: conv.title || 'Untitled conversation',
+        timestamp: conv.createdat,
+        metadata: {
+          conversationId: conv.id
+        }
+      })) || [];
+    } catch (convError) {
+      // Conversations table might not exist, ignore
+      console.log('Conversations table not available, skipping conversation activity');
+    }
+
+    // Convert jobs to activity format with rich data
+    const jobActivities = jobs?.map((job: any) => ({
+      id: job.id,
+      type: 'job',
+      title: getJobTitle(job.type, job.status),
+      description: job.prompt || 'No description available',
+      timestamp: job.updatedat || job.createdat,
+      status: job.status,
+      metadata: {
+        jobId: job.id,
+        jobType: job.type,
+        output: job.output,
+        error: job.error,
+        jobMetadata: job.metadata,
+        userId: job.userid
+      }
+    })) || [];
+
+
+    // Helper function to get better job titles
+    function getJobTitle(type: string, status: string) {
+      const typeMap: { [key: string]: string } = {
+        'SCAFFOLD': 'Project Setup',
+        'AI_ACTION': 'AI Code Generation', 
+        'EDIT': 'Code Modification',
+        'TEST': 'Test Execution',
+        'DEPLOY': 'Deployment',
+        'BUILD': 'Build Process'
+      };
+      
+      const statusMap: { [key: string]: string } = {
+        'PENDING': 'queued',
+        'RUNNING': 'in progress',
+        'COMPLETED': 'completed',
+        'FAILED': 'failed',
+        'CANCELLED': 'cancelled'
+      };
+      
+      const jobType = typeMap[type] || type;
+      const jobStatus = statusMap[status] || status.toLowerCase();
+      
+      return `${jobType} ${jobStatus}`;
+    }
+
+    // Combine all activities including project creation
+    const allActivities = [
+      ...jobActivities, 
+      ...conversationActivities,
+      {
+        id: 'project_created',
+        type: 'system',
+        title: 'Project created',
+        description: `Project "${project.name}" was created`,
+        timestamp: project.createdat,
+        status: 'COMPLETED'
+      }
+    ];
+    
+    // Sort all activities by timestamp (newest first)
+    allActivities.sort((a, b) => {
+      const timeA = new Date(a.timestamp).getTime();
+      const timeB = new Date(b.timestamp).getTime();
+      return timeB - timeA; // newest first (larger timestamp first)
+    });
+    
+    const finalActivities = allActivities.slice(0, limit);
+    console.log(`[DEBUG] Returning ${finalActivities.length} activities for project ${id}`);
+    console.log('[DEBUG] Final activity order:');
+    finalActivities.forEach((activity, i) => {
+      console.log(`  ${i}: ${activity.title} - ${activity.timestamp}`);
+    });
+    res.json({ activities: finalActivities });
+  } catch (error) {
+    console.error('Failed to get activity:', error);
+    res.status(500).json({ error: 'Failed to get activity' });
+  }
+});
+
+// Update job status (internal endpoint)
+router.patch('/jobs/:id', async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const { status, output, error, metadata } = req.body;
+
+    await db.updateJobStatus(id, status, output, error, metadata);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Failed to update job:', error);
+    res.status(500).json({ error: 'Failed to update job' });
+  }
+});
+
+// Preview service endpoints
+router.post('/projects/:id/preview/start', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const { name, type } = req.body;
+    const { supabaseService, db } = getServices(req);
+    
+    console.log(`🚀 [PREVIEW START] Starting preview for project ${id}:`, { name, type });
+    console.log(`🔧 [PREVIEW START] Environment: NODE_ENV=${process.env.NODE_ENV}, PORT=${process.env.PORT}`);
+    console.log(`💾 [PREVIEW START] Memory usage:`, process.memoryUsage());
+    console.log(`🌍 [PREVIEW START] Platform:`, process.platform, process.arch);
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    // Start real preview using PreviewManager
+    console.log(`📋 [PREVIEW START] Project found:`, { name: project.name, userid: project.userid });
+    console.log(`⚡ [PREVIEW START] Calling previewManager.startPreview...`);
+    
+    const preview = await previewManager.startPreview(
+      id,
+      req.user.id,
+      name || project.name || 'Project Preview',
+      type || 'nextjs',
+      req
+    );
+    
+    console.log(`✅ [PREVIEW START] Preview created successfully:`, { id: preview.id, status: preview.status, url: preview.url });
+    
+    res.status(201).json({
+      success: true,
+      preview: {
+        id: preview.id,
+        projectId: preview.projectId,
+        userId: preview.userId,
+        name: name || project.name || 'Project Preview',
+        type: type || 'nextjs',
+        status: preview.status,
+        url: preview.url,
+        port: preview.port,
+        localPath: preview.localPath,
+        syncResult: preview.syncResult,
+        startTime: preview.startTime.toISOString(),
+        lastAccessed: preview.lastAccessed.toISOString(),
+        errorMessage: preview.errorMessage
+      }
+    });
+  } catch (error) {
+    console.error(`❌ [PREVIEW START] Failed to start preview for project ${req.params.id}:`, error);
+    console.error(`❌ [PREVIEW START] Error type:`, error instanceof Error ? error.constructor.name : typeof error);
+    console.error(`❌ [PREVIEW START] Error message:`, error instanceof Error ? error.message : String(error));
+    console.error(`❌ [PREVIEW START] Error stack:`, error instanceof Error ? error.stack : 'No stack trace');
+    console.log(`💾 [PREVIEW START] Memory usage after error:`, process.memoryUsage());
+    
+    res.status(500).json({ 
+      error: 'Failed to start preview', 
+      details: process.env.NODE_ENV === 'development' ? (error instanceof Error ? error.message : String(error)) : undefined 
+    });
+  }
+});
+
+router.delete('/projects/:id/preview/:previewId', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id, previewId } = req.params;
+    
+    console.log(`Stopping preview ${previewId} for project ${id}`);
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    // Stop real preview using PreviewManager
+    await previewManager.stopPreview(previewId);
+    console.log(`Preview ${previewId} stopped for project ${id}`);
+    
+    res.json({ success: true, message: `Preview ${previewId} stopped` });
+  } catch (error) {
+    console.error('Failed to stop preview:', error);
+    res.status(500).json({ error: 'Failed to stop preview' });
+  }
+});
+
+router.get('/projects/:id/preview/:previewId/status', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id, previewId } = req.params;
+    const { supabaseService, db } = getServices(req);
+    
+    console.log(`Getting status for preview ${previewId} of project ${id}`);
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    // Get real preview status
+    const preview = previewManager.getPreview(previewId);
+    
+    if (!preview) {
+      return res.status(404).json({ error: 'Preview not found' });
+    }
+    
+    res.json({
+      success: true,
+      preview: {
+        id: preview.id,
+        projectId: preview.projectId,
+        userId: preview.userId,
+        status: preview.status,
+        url: preview.url,
+        port: preview.port,
+        localPath: preview.localPath,
+        syncResult: preview.syncResult,
+        startTime: preview.startTime.toISOString(),
+        lastAccessed: preview.lastAccessed.toISOString(),
+        errorMessage: preview.errorMessage
+      }
+    });
+  } catch (error) {
+    console.error('Failed to get preview status:', error);
+    res.status(500).json({ error: 'Failed to get preview status' });
+  }
+});
+
+router.get('/projects/:id/preview/list', authenticateUser, async (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const { supabaseService, db } = getServices(req);
+    
+    console.log(`Listing previews for project ${id}`);
+    
+    const project = await db.getProjectById(id);
+    if (!project || project.userid !== req.user.id) {
+      return res.status(404).json({ error: 'Project not found or access denied' });
+    }
+
+    // Get real preview list for project
+    const previews = previewManager.getPreviewsForProject(id);
+    
+    const previewList = previews.map(preview => ({
+      id: preview.id,
+      projectId: preview.projectId,
+      userId: preview.userId,
+      name: `Preview ${preview.id.split('-')[1]}`,
+      type: 'nextjs',
+      status: preview.status,
+      url: preview.url,
+      port: preview.port,
+      localPath: preview.localPath,
+      syncResult: preview.syncResult,
+      startTime: preview.startTime.toISOString(),
+      lastAccessed: preview.lastAccessed.toISOString(),
+      errorMessage: preview.errorMessage
+    }));
+    
+    res.json({
+      success: true,
+      previews: previewList
+    });
+  } catch (error) {
+    console.error('Failed to list previews:', error);
+    res.status(500).json({ error: 'Failed to list previews' });
+  }
+});
+
+console.log('✅ [Preview Proxy] Routes registered at /projects/:id/preview/:previewId/proxy/*');
+
+// Proxy handler function
+const handleProxyRequest = async (req: any, res: any) => {
+  console.log(`🔄 [Preview Proxy] Request received for project ${req.params.id}, preview ${req.params.previewId}`);
+  console.log(`🔄 [Preview Proxy] Full request URL: ${req.url}`);
+  console.log(`🔄 [Preview Proxy] Request method: ${req.method}`);
+  console.log(`🔄 [Preview Proxy] Request params:`, req.params);
+  console.log(`🔄 [Preview Proxy] Query parameters:`, req.query);
+  console.log(`🔄 [Preview Proxy] Headers:`, { 
+    'user-agent': req.headers['user-agent'], 
+    'referer': req.headers['referer'],
+    'origin': req.headers['origin']
+  });
+  
+  // Get services from req
+  const { supabaseService, db } = getServices(req);
+  
+  // Check if this is an asset request (CSS, JS, images, fonts, etc.)
+  const additionalPath = req.params[0] || '';
+  const isAssetRequest = additionalPath && (
+    additionalPath.includes('/_next/') ||
+    additionalPath.match(/\.(css|js|png|jpg|jpeg|gif|svg|webp|ico|woff|woff2|ttf|eot)(\?|$)/) ||
+    additionalPath.startsWith('static/') ||
+    additionalPath.startsWith('assets/')
+  );
+
+  // Handle authentication via query parameter for iframe requests
+  const token = req.query.token;
+  if (!token && !isAssetRequest) {
+    console.log(`❌ [Preview Proxy] No token provided in query parameters for non-asset request`);
+    return res.status(401).json({ error: 'Authentication token required' });
+  }
+  
+  if (isAssetRequest && !token) {
+    console.log(`📦 [Preview Proxy] Asset request without token - allowing: ${additionalPath}`);
+    // For asset requests, skip authentication and proceed
+    req.user = { id: 'asset-request' };
+  }
+  
+  // Skip token verification for asset requests
+  if (!isAssetRequest || token) {
+    console.log(`🔑 [Preview Proxy] Token found, verifying authentication...`);
+    
+    // Check if Supabase service client is available
+    const { supabaseService, db } = getServices(req);
+    if (!supabaseService) {
+      console.log(`❌ [Preview Proxy] Supabase service not available - allowing request for development`);
+      // In development/limited mode, just proceed without authentication
+      req.user = { id: 'dev-user' };
+    } else {
+      try {
+        console.log(`🔑 [Preview Proxy] Using service client to verify token...`);
+        const { data: { user }, error } = await supabaseService.auth.getUser(token);
+        console.log(`🔑 [Preview Proxy] Auth result:`, { user: user?.id || 'none', error: error?.message || 'none' });
+        
+        if (error || !user) {
+          console.log(`❌ [Preview Proxy] Invalid token:`, error?.message || 'No user returned');
+          return res.status(401).json({ error: 'Invalid authentication token' });
+        }
+        req.user = user;
+        console.log(`✅ [Preview Proxy] User authenticated:`, user.id);
+      } catch (error) {
+        console.log(`❌ [Preview Proxy] Authentication exception:`, error);
+        return res.status(401).json({ error: 'Authentication failed' });
+      }
+    }
+  }
+  try {
+    const { id, previewId } = req.params;
+    const enableInspection = req.query.inspection === 'true';
+    
+    console.log(`[Preview Proxy] Proxying preview ${previewId} with inspection: ${enableInspection}`);
+    
+    // Get the preview instance
+    console.log(`🔍 [Preview Proxy] Looking for preview: ${previewId}`);
+    const preview = previewManager.getPreview(previewId);
+    console.log(`🔍 [Preview Proxy] Found preview:`, preview ? { id: preview.id, status: preview.status, url: preview.url } : 'null');
+    
+    if (!preview || preview.status !== 'running') {
+      console.log(`❌ [Preview Proxy] Preview not found or not running. Status: ${preview?.status || 'null'}`);
+      return res.status(404).json({ error: 'Preview not found or not running' });
+    }
+    
+    // Build target URL - append the additional path from the request
+    const additionalPath = req.params[0] || ''; // Get the wildcard part
+    const baseUrl = preview.internalUrl || `http://localhost:${preview.port}`;
+    const targetUrl = additionalPath ? `${baseUrl}/${additionalPath}` : baseUrl;
+    
+    // STEP 0: Check for AI-modified files in Supabase Storage first
+    const requestedFile = additionalPath;
+    if (requestedFile && supabaseService && !requestedFile.includes('_next/') && !requestedFile.includes('favicon')) {
+      console.log(`🔍 [Preview Proxy] Checking for AI-modified file: ${requestedFile}`);
+      
+      try {
+        const { data, error } = await supabaseService.storage
+          .from('project-files')
+          .download(`${id}/${requestedFile}`);
+          
+        if (!error && data) {
+          console.log(`✅ [Preview Proxy] Found AI-modified file in storage: ${requestedFile}`);
+          const content = await data.text();
+          const contentType = getFileContentType(requestedFile);
+          
+          res.set('Content-Type', contentType);
+          res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+          res.set('X-Celiador-Source', 'AI-Modified');
+          return res.send(content);
+        }
+      } catch (storageError) {
+        console.log(`📁 [Preview Proxy] No AI-modified version found for ${requestedFile}, using preview server`);
+      }
+    }
+
+    // Fetch the original preview content
+    console.log(`📡 [Preview Proxy] Fetching content from: ${targetUrl}`);
+    console.log(`📡 [Preview Proxy] Preview process status:`, {
+      id: preview.id,
+      status: preview.status,
+      port: preview.port,
+      processRunning: !!preview.process && !preview.process.killed
+    });
+    
+    let originalResponse;
+    try {
+      originalResponse = await fetch(targetUrl);
+      console.log(`📡 [Preview Proxy] Fetch response:`, {
+        status: originalResponse.status,
+        statusText: originalResponse.statusText,
+        contentType: originalResponse.headers.get('content-type')
+      });
+      
+      if (!originalResponse.ok) {
+        console.log(`❌ [Preview Proxy] Fetch failed with status ${originalResponse.status}: ${originalResponse.statusText}`);
+        return res.status(originalResponse.status).json({ 
+          error: 'Failed to fetch preview content',
+          details: `${originalResponse.status} ${originalResponse.statusText}`,
+          targetUrl: targetUrl
+        });
+      }
+    } catch (fetchError) {
+      console.log(`❌ [Preview Proxy] Fetch exception:`, fetchError);
+      return res.status(500).json({ 
+        error: 'Failed to connect to preview server',
+        details: fetchError instanceof Error ? fetchError.message : String(fetchError),
+        targetUrl: targetUrl
+      });
+    }
+    
+    const contentType = originalResponse.headers.get('content-type') || 'text/html';
+    
+    // Handle HTML content - always rewrite URLs, optionally inject inspection script
+    const isRootRequest = !additionalPath || additionalPath === '';
+    const isPageRequest = contentType.includes('text/html') && (isRootRequest || !additionalPath.includes('.'));
+    
+    console.log(`[Preview Proxy] Content analysis: contentType=${contentType}, isRootRequest=${isRootRequest}, isPageRequest=${isPageRequest}, additionalPath="${additionalPath}"`);
+    
+    if (isPageRequest) {
+      let html = await originalResponse.text();
+      
+      // Transform HTML for proxy mode - comprehensive approach like inspection mode
+      const proxyBasePath = `/projects/${id}/preview/${previewId}/proxy`;
+      
+      console.log(`[Preview Proxy] Transforming HTML for proxy mode...`);
+      
+      // STEP 1: Disable Next.js client-side routing completely
+      // Remove Next.js router scripts and data that enable client-side navigation
+      html = html.replace(/<script[^>]*\/_next\/static\/chunks\/main-app\.js[^>]*><\/script>/g, '');
+      html = html.replace(/<script[^>]*\/_next\/static\/chunks\/app-pages-internals\.js[^>]*><\/script>/g, '');
+      html = html.replace(/<script[^>]*next\/router[^>]*><\/script>/g, '');
+      
+      // Remove Next.js hydration data to prevent client-side routing
+      html = html.replace(/<script id="__NEXT_DATA__"[^>]*>.*?<\/script>/gs, '');
+      
+      // STEP 2: Transform all URLs to go through proxy
+      
+      // Rewrite _next URLs (Next.js built assets) - avoid double proxy paths
+      html = html.replace(/href="(\/_next\/[^"]+)"/g, (match, url) => {
+        return url.includes('/projects/') ? match : `href="${proxyBasePath}${url}"`;
+      });
+      html = html.replace(/src="(\/_next\/[^"]+)"/g, (match, url) => {
+        return url.includes('/projects/') ? match : `src="${proxyBasePath}${url}"`;
+      });
+      html = html.replace(/href='(\/_next\/[^']+)'/g, (match, url) => {
+        return url.includes('/projects/') ? match : `href='${proxyBasePath}${url}'`;
+      });
+      html = html.replace(/src='(\/_next\/[^']+)'/g, (match, url) => {
+        return url.includes('/projects/') ? match : `src='${proxyBasePath}${url}'`;
+      });
+      
+      // Rewrite other common asset paths that start with / - avoid double proxy paths
+      // CSS files
+      html = html.replace(/href="(\/[^"]+\.css[^"]*)"/g, (match, url) => {
+        return url.includes('/projects/') ? match : `href="${proxyBasePath}${url}"`;
+      });
+      html = html.replace(/href='(\/[^']+\.css[^']*)'/g, (match, url) => {
+        return url.includes('/projects/') ? match : `href='${proxyBasePath}${url}'`;
+      });
+      
+      // JavaScript files  
+      html = html.replace(/src="(\/[^"]+\.js[^"]*)"/g, (match, url) => {
+        return url.includes('/projects/') ? match : `src="${proxyBasePath}${url}"`;
+      });
+      html = html.replace(/src='(\/[^']+\.js[^']*)'/g, (match, url) => {
+        return url.includes('/projects/') ? match : `src='${proxyBasePath}${url}'`;
+      });
+      
+      // Images
+      html = html.replace(/src="(\/[^"]+\.(png|jpg|jpeg|gif|svg|webp|ico)[^"]*)"/g, (match, url) => {
+        return url.includes('/projects/') ? match : `src="${proxyBasePath}${url}"`;
+      });
+      html = html.replace(/src='(\/[^']+\.(png|jpg|jpeg|gif|svg|webp|ico)[^']*)'/g, (match, url) => {
+        return url.includes('/projects/') ? match : `src='${proxyBasePath}${url}'`;
+      });
+      
+      // Fonts and other assets
+      html = html.replace(/href="(\/[^"]+\.(woff|woff2|ttf|eot)[^"]*)"/g, (match, url) => {
+        return url.includes('/projects/') ? match : `href="${proxyBasePath}${url}"`;
+      });
+      html = html.replace(/href='(\/[^']+\.(woff|woff2|ttf|eot)[^']*)'/g, (match, url) => {
+        return url.includes('/projects/') ? match : `href='${proxyBasePath}${url}'`;
+      });
+      
+      // CRITICAL: Rewrite navigation links (href="/path") to go through proxy
+      // This fixes "Cannot GET /products" errors when clicking links
+      html = html.replace(/href="(\/[^"]*?)"/g, (match, url) => {
+        // Skip if already proxied, or if it's an asset, or if it's an anchor link
+        if (url.includes('/projects/') || 
+            url.match(/\.(css|js|png|jpg|jpeg|gif|svg|webp|ico|woff|woff2|ttf|eot)(\?|$)/) ||
+            url.startsWith('#') ||
+            url.includes('_next/')) {
+          return match;
+        }
+        console.log(`[Preview Proxy] Rewriting navigation link: ${url} -> ${proxyBasePath}${url}`);
+        return `href="${proxyBasePath}${url}"`;
+      });
+      
+      html = html.replace(/href='(\/[^']*?)'/g, (match, url) => {
+        // Skip if already proxied, or if it's an asset, or if it's an anchor link
+        if (url.includes('/projects/') || 
+            url.match(/\.(css|js|png|jpg|jpeg|gif|svg|webp|ico|woff|woff2|ttf|eot)(\?|$)/) ||
+            url.startsWith('#') ||
+            url.includes('_next/')) {
+          return match;
+        }
+        console.log(`[Preview Proxy] Rewriting navigation link: ${url} -> ${proxyBasePath}${url}`);
+        return `href='${proxyBasePath}${url}'`;
+      });
+
+      // STEP 3: Preserve token in all navigation links
+      const token = req.query.token;
+      if (token) {
+        // Add token to all navigation links
+        html = html.replace(/href="(\/projects\/[^"]*\/proxy\/[^"]*?)"/g, (match, url) => {
+          const separator = url.includes('?') ? '&' : '?';
+          return `href="${url}${separator}token=${token}"`;
+        });
+      }
+      
+      // STEP 4: Add base tag to ensure all relative URLs go through proxy  
+      const baseTag = `<base href="${proxyBasePath}/${token ? '?token=' + token : ''}">`;
+      if (html.includes('<head>')) {
+        html = html.replace('<head>', `<head>\n${baseTag}`);
+      } else {
+        html = baseTag + html;
+      }
+      
+      // STEP 5: Add browser-like navigation bar integrated into the content
+      const browserNavScript = `
+<script>
+// Add integrated browser navigation for preview mode
+(function() {
+  let navigationHistory = JSON.parse(sessionStorage.getItem('celiadorNavHistory') || '[]');
+  const currentUrl = window.location.href;
+  
+  // Track current page in history
+  if (navigationHistory.length === 0 || navigationHistory[navigationHistory.length - 1] !== currentUrl) {
+    navigationHistory.push(currentUrl);
+    sessionStorage.setItem('celiadorNavHistory', JSON.stringify(navigationHistory));
+  }
+  
+  // Auto-refresh detection for AI file changes
+  let lastRefreshCheck = Date.now();
+  setInterval(() => {
+    // Check if we need to refresh due to file changes
+    // This is a simple approach - could be enhanced with WebSockets later
+    if (Date.now() - lastRefreshCheck > 30000) { // Check every 30 seconds
+      lastRefreshCheck = Date.now();
+      
+      // Check for a special header that indicates AI modifications
+      fetch(window.location.href, { method: 'HEAD' })
+        .then(response => {
+          if (response.headers.get('X-Celiador-Source') === 'AI-Modified') {
+            console.log('🔄 AI file changes detected, refreshing page...');
+            window.location.reload();
+          }
+        })
+        .catch(() => {
+          // Ignore errors in background checks
+        });
+    }
+  }, 5000); // Check every 5 seconds
+  
+  // Add integrated browser navigation bar
+  function addIntegratedNavBar() {
+    // Only add if no nav bar exists
+    if (!document.getElementById('celiador-integrated-nav')) {
+      const navBar = document.createElement('div');
+      navBar.id = 'celiador-integrated-nav';
+      
+      const canGoBack = navigationHistory.length > 1;
+      const currentPageUrl = window.location.pathname + window.location.search;
+      
+      navBar.innerHTML = \`
+        <div style="
+          position: fixed;
+          top: 0;
+          left: 0;
+          right: 0;
+          height: 40px;
+          background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+          border-bottom: 1px solid #dee2e6;
+          z-index: 10000;
+          display: flex;
+          align-items: center;
+          padding: 0 12px;
+          gap: 8px;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        ">
+          <!-- Back Button -->
+          <button 
+            id="celiador-back-btn"
+            onclick="celiadorGoBack()" 
+            style="
+              background: \${canGoBack ? '#f8f9fa' : '#e9ecef'};
+              color: \${canGoBack ? '#495057' : '#adb5bd'};
+              border: 1px solid \${canGoBack ? '#dee2e6' : '#e9ecef'};
+              border-radius: 4px;
+              padding: 4px 6px;
+              font-size: 12px;
+              cursor: \${canGoBack ? 'pointer' : 'not-allowed'};
+              display: flex;
+              align-items: center;
+              transition: all 0.2s ease;
+              min-width: 28px;
+              height: 28px;
+              justify-content: center;
+            "
+            \${canGoBack ? '' : 'disabled'}
+            onmouseover="if (!this.disabled) { this.style.background='#e9ecef'; }"
+            onmouseout="if (!this.disabled) { this.style.background='#f8f9fa'; }"
+            title="\${canGoBack ? 'Go back' : 'No previous page'}"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.42-1.41L7.83 13H20v-2z"/>
+            </svg>
+          </button>
+          
+          <!-- Forward Button (disabled) -->
+          <button style="
+            background: #e9ecef;
+            color: #adb5bd;
+            border: 1px solid #e9ecef;
+            border-radius: 4px;
+            padding: 4px 6px;
+            font-size: 12px;
+            cursor: not-allowed;
+            display: flex;
+            align-items: center;
+            min-width: 28px;
+            height: 28px;
+            justify-content: center;
+          " disabled title="Forward (disabled)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M4 13h12.17l-5.59 5.59L12 20l8-8-8-8-1.41 1.41L16.17 11H4v2z"/>
+            </svg>
+          </button>
+          
+          <!-- Refresh Button -->
+          <button onclick="window.location.reload()" style="
+            background: #f8f9fa;
+            color: #495057;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            padding: 4px 6px;
+            font-size: 12px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            min-width: 28px;
+            height: 28px;
+            justify-content: center;
+            transition: all 0.2s ease;
+          "
+          onmouseover="this.style.background='#e9ecef';"
+          onmouseout="this.style.background='#f8f9fa';"
+          title="Refresh page"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
+            </svg>
+          </button>
+          
+          <!-- URL Address Bar -->
+          <div style="
+            flex: 1;
+            background: white;
+            border: 1px solid #ced4da;
+            border-radius: 16px;
+            padding: 4px 12px;
+            font-size: 12px;
+            color: #495057;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            min-width: 0;
+            margin: 0 8px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            height: 28px;
+          ">
+            <!-- Lock Icon -->
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="#28a745">
+              <path d="M12,17A2,2 0 0,0 14,15C14,13.89 13.1,13 12,13A2,2 0 0,0 10,15A2,2 0 0,0 12,17M18,8A2,2 0 0,1 20,10V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V10C4,8.89 4.9,8 6,8H7V6A5,5 0 0,1 12,1A5,5 0 0,1 17,6V8H18M12,3A3,3 0 0,0 9,6V8H15V6A3,3 0 0,0 12,3Z"/>
+            </svg>
+            <span>\${currentPageUrl}</span>
+          </div>
+        </div>
+      \`;
+      
+      // Insert at beginning of body
+      if (document.body.firstChild) {
+        document.body.insertBefore(navBar, document.body.firstChild);
+      } else {
+        document.body.appendChild(navBar);
+      }
+      
+      // Add top margin to body for the navigation bar
+      document.body.style.marginTop = '40px';
+      document.body.style.paddingTop = '0px';
+    }
+  }
+  
+  // Back button functionality
+  window.celiadorGoBack = function() {
+    if (navigationHistory.length > 1) {
+      navigationHistory.pop();
+      sessionStorage.setItem('celiadorNavHistory', JSON.stringify(navigationHistory));
+      const previousUrl = navigationHistory[navigationHistory.length - 1];
+      window.location.href = previousUrl;
+    }
+  };
+  
+  // Add navigation bar when DOM is ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', addIntegratedNavBar);
+  } else {
+    addIntegratedNavBar();
+  }
+})();
+</script>`;
+
+      // Inject navigation script
+      if (html.includes('</body>')) {
+        html = html.replace('</body>', browserNavScript + '\n</body>');
+      } else {
+        html += browserNavScript;
+      }
+
+      console.log('✅ [Preview Proxy] Transformed HTML for proxy mode - disabled client-side routing, added navigation tracking');
+
+      // Simple inspection script
+      const inspectionScript = `
+<script>
+console.log('🎯 Celiador Inspection Script Loaded');
+
+window.celiadorInspection = {
+  enabled: false,
+  elements: [],
+  
+  scan: function() {
+    console.log('🔍 Scanning for elements with enhanced metadata...');
+    this.elements = [];
+    
+    // Expanded selectors to capture more interactive elements
+    const selectors = 'button, input, a, div, nav, header, main, section, form, img, h1, h2, h3, h4, h5, h6, p, span, li, ul, ol';
+    const foundElements = document.querySelectorAll(selectors);
+    
+    foundElements.forEach((el, i) => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 5 && rect.height > 5) { // Reduced threshold to catch more elements
+        
+        // Enhanced component name detection
+        const getComponentName = (element) => {
+          // Check for React component data attributes
+          if (element.dataset.component) return element.dataset.component;
+          if (element.dataset.testid) return element.dataset.testid;
+          
+          // Check for common naming patterns in classes
+          const classes = element.className?.split(' ') || [];
+          for (const cls of classes) {
+            if (cls.includes('component') || cls.includes('Component')) return cls;
+            if (cls.includes('btn') && cls.includes('primary')) return 'PrimaryButton';
+            if (cls.includes('btn') && cls.includes('secondary')) return 'SecondaryButton';
+            if (cls.includes('btn') && cls.includes('outline')) return 'OutlineButton';
+            if (cls.includes('card')) return 'Card';
+            if (cls.includes('modal')) return 'Modal';
+            if (cls.includes('header')) return 'Header';
+            if (cls.includes('nav')) return 'Navigation';
+            if (cls.includes('hero')) return 'HeroSection';
+            if (cls.includes('footer')) return 'Footer';
+          }
+          
+          // Check parent elements for context
+          let parent = element.parentElement;
+          let depth = 0;
+          while (parent && depth < 3) {
+            const parentClasses = parent.className?.split(' ') || [];
+            for (const cls of parentClasses) {
+              if (cls.includes('component') || cls.includes('Component')) return cls + '_Child';
+            }
+            parent = parent.parentElement;
+            depth++;
+          }
+          
+          // Use element attributes for naming
+          if (element.id) return element.id;
+          if (element.name) return element.name;
+          if (element.getAttribute('aria-label')) return element.getAttribute('aria-label');
+          if (element.getAttribute('title')) return element.getAttribute('title');
+          
+          return element.tagName.toLowerCase();
+        };
+        
+        // Enhanced selector generation
+        const generateBetterSelector = (element) => {
+          const selectors = [];
+          
+          // ID selector (highest priority)
+          if (element.id) {
+            selectors.push('#' + element.id);
+          }
+          
+          // Class selector
+          if (element.className) {
+            const classes = element.className.trim().split(/\\s+/);
+            if (classes.length > 0) {
+              selectors.push(element.tagName.toLowerCase() + '.' + classes.join('.'));
+            }
+          }
+          
+          // Attribute selectors
+          if (element.getAttribute('data-testid')) {
+            selectors.push('[data-testid="' + element.getAttribute('data-testid') + '"]');
+          }
+          
+          if (element.getAttribute('aria-label')) {
+            selectors.push('[aria-label="' + element.getAttribute('aria-label') + '"]');
+          }
+          
+          // Text-based selector for buttons and links
+          if ((element.tagName === 'BUTTON' || element.tagName === 'A') && element.textContent.trim()) {
+            const text = element.textContent.trim().substring(0, 20);
+            selectors.push(element.tagName.toLowerCase() + ':contains("' + text + '")');
+          }
+          
+          // Fallback to basic selector
+          if (selectors.length === 0) {
+            selectors.push(element.tagName.toLowerCase());
+          }
+          
+          return selectors[0]; // Return the most specific selector
+        };
+        
+        // Extract comprehensive element information
+        const elementInfo = {
+          id: 'element-' + i,
+          type: el.tagName.toLowerCase(),
+          componentName: getComponentName(el),
+          selector: generateBetterSelector(el),
+          boundingBox: {
+            x: Math.round(rect.left),
+            y: Math.round(rect.top),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height)
+          },
+          text: el.textContent?.trim().substring(0, 100) || '',
+          attributes: {
+            id: el.id || null,
+            className: el.className || null,
+            type: el.type || null,
+            href: el.href || null,
+            src: el.src || null,
+            alt: el.alt || null,
+            title: el.title || null,
+            placeholder: el.placeholder || null,
+            'aria-label': el.getAttribute('aria-label') || null,
+            'data-testid': el.getAttribute('data-testid') || null,
+            role: el.getAttribute('role') || null
+          },
+          styles: {
+            display: window.getComputedStyle(el).display,
+            position: window.getComputedStyle(el).position,
+            backgroundColor: window.getComputedStyle(el).backgroundColor,
+            color: window.getComputedStyle(el).color,
+            fontSize: window.getComputedStyle(el).fontSize
+          },
+          context: {
+            parentTag: el.parentElement?.tagName.toLowerCase() || null,
+            parentClass: el.parentElement?.className || null,
+            siblingCount: el.parentElement?.children.length || 0,
+            indexInParent: Array.from(el.parentElement?.children || []).indexOf(el)
+          }
+        };
+        
+        // Filter out null attributes
+        Object.keys(elementInfo.attributes).forEach(key => {
+          if (elementInfo.attributes[key] === null) {
+            delete elementInfo.attributes[key];
+          }
+        });
+        
+        this.elements.push(elementInfo);
+      }
+    });
+    
+    // Send elements to parent
+    window.parent.postMessage({
+      type: 'ELEMENTS_MAPPED',
+      elements: this.elements
+    }, '*');
+    
+    console.log('📡 Found and sent', this.elements.length, 'elements');
+  },
+  
+  toggle: function(enabled) {
+    this.enabled = enabled;
+    console.log('🔄 Inspection', enabled ? 'enabled' : 'disabled');
+    if (enabled) {
+      this.scan();
+    } else {
+      this.elements = [];
+    }
+  }
+};
+
+// Listen for messages from parent
+window.addEventListener('message', (event) => {
+  if (event.data.type === 'ENABLE_INSPECTION') {
+    window.celiadorInspection.toggle(true);
+  } else if (event.data.type === 'DISABLE_INSPECTION') {
+    window.celiadorInspection.toggle(false);
+  }
+});
+
+console.log('✅ Celiador Inspection Ready');
+</script>`;
+      
+      // Conditionally inject inspection script only when requested
+
+      if (enableInspection) {
+        // Inject before closing </body> tag
+        if (html.includes('</body>')) {
+          html = html.replace('</body>', inspectionScript + '\n</body>');
+        } else {
+          html += inspectionScript;
+        }
+        console.log('✅ [Preview Proxy] Injected inspection script');
+      }
+      
+      res.setHeader('Content-Type', 'text/html');
+      res.send(html);
+    } else {
+      // For non-HTML content (CSS, JS, images), just proxy through
+      const buffer = await originalResponse.arrayBuffer();
+      res.setHeader('Content-Type', contentType);
+      res.send(Buffer.from(buffer));
+    }
+    
+  } catch (error) {
+    console.error('Preview proxy error:', error);
+    res.status(500).json({ error: 'Failed to proxy preview content' });
+  }
+};
+
+// Register both routes - root and wildcard paths
+router.get('/projects/:id/preview/:previewId/proxy', handleProxyRequest);
+router.get('/projects/:id/preview/:previewId/proxy/*', handleProxyRequest);
+
+console.log('✅ [Inspection Preview] Route registered at /projects/:id/preview/:previewId/inspection');
+
+// New inspection preview endpoint - generates server-side inspection overlay
+router.get('/projects/:id/preview/:previewId/inspection', async (req: any, res: any) => {
+  console.log(`🔍 [Inspection Preview] Request for project ${req.params.id}, preview ${req.params.previewId}`);
+  
+  // Handle authentication via query parameter for iframe requests
+  const token = req.query.token;
+  if (!token) {
+    console.log(`❌ [Inspection Preview] No token provided`);
+    return res.status(401).json({ error: 'Authentication token required' });
+  }
+  
+  try {
+    console.log(`🔑 [Inspection Preview] Using service client to verify token...`);
+    const { data: { user }, error } = await supabaseService.auth.getUser(token);
+    console.log(`🔑 [Inspection Preview] Auth result:`, { user: user?.id || 'none', error: error?.message || 'none' });
+    
+    if (error || !user) {
+      console.log(`❌ [Inspection Preview] Authentication failed:`, error?.message || 'Unknown error');
+      return res.status(401).json({ error: 'Invalid authentication token' });
+    }
+    console.log(`✅ [Inspection Preview] User authenticated: ${user.id}`);
+    req.user = user;
+  } catch (error) {
+    console.log(`❌ [Inspection Preview] Authentication exception:`, error);
+    return res.status(401).json({ error: 'Authentication failed' });
+  }
+  
+  try {
+    const { id, previewId } = req.params;
+    
+    console.log(`[Inspection Preview] Generating inspection layer for preview ${previewId}`);
+    
+    // Get the preview instance
+    console.log(`🔍 [Inspection Preview] Looking for preview: ${previewId}`);
+    const preview = previewManager.getPreview(previewId);
+    console.log(`🔍 [Inspection Preview] Found preview:`, preview ? { id: preview.id, status: preview.status, url: preview.url } : 'null');
+    
+    if (!preview || preview.status !== 'running') {
+      console.log(`❌ [Inspection Preview] Preview not found or not running. Status: ${preview?.status || 'null'}`);
+      return res.status(404).json({ error: 'Preview not found or not running' });
+    }
+    
+    // Fetch the original preview HTML
+    const baseUrl = preview.internalUrl || `http://localhost:${preview.port}`;
+    console.log(`📡 [Inspection Preview] Fetching original content from: ${baseUrl}`);
+    console.log(`📡 [Inspection Preview] Preview details:`, { 
+      internalUrl: preview.internalUrl, 
+      port: preview.port, 
+      status: preview.status 
+    });
+    const originalResponse = await fetch(baseUrl);
+    if (!originalResponse.ok) {
+      console.log(`❌ [Inspection Preview] Fetch failed with status: ${originalResponse.status} ${originalResponse.statusText}`);
+      return res.status(originalResponse.status).json({ error: 'Failed to fetch preview content' });
+    }
+    
+    const originalHtml = await originalResponse.text();
+    
+    // Generate inspection overlay HTML with URL rewriting for assets
+    const inspectionHtml = await generateInspectionOverlay(originalHtml, id, previewId, preview.url);
+    
+    console.log('✅ [Inspection Preview] Generated inspection overlay HTML');
+    
+    res.setHeader('Content-Type', 'text/html');
+    res.send(inspectionHtml);
+    
+  } catch (error) {
+    console.error('Inspection preview error:', error);
+    res.status(500).json({ error: 'Failed to generate inspection preview' });
+  }
+});
+
+// Generate inspection overlay HTML with clickable elements
+async function generateInspectionOverlay(originalHtml: string, projectId: string, previewId: string, originalPreviewUrl: string): Promise<string> {
+  console.log('🔍 [Inspection Overlay] Parsing HTML and generating inspection layer');
+  
+  try {
+    // Parse the HTML with JSDOM
+    const dom = new JSDOM(originalHtml);
+    const document = dom.window.document;
+    
+    // Find all interactive elements
+    const selectors = [
+      'button',
+      'input',
+      'a[href]',
+      'div[onclick]',
+      'span[onclick]',
+      '[role="button"]',
+      'nav',
+      'header',
+      'main',
+      'section',
+      '.btn',
+      '.button',
+      '[class*="btn"]'
+    ];
+    
+    const elements: any[] = [];
+    let elementIndex = 0;
+    
+    // Scan for elements using each selector
+    selectors.forEach(selector => {
+      const foundElements = document.querySelectorAll(selector);
+      foundElements.forEach((el: any) => {
+        // Skip elements that are too small or hidden
+        const computedStyle = el.style || {};
+        if (computedStyle.display === 'none' || computedStyle.visibility === 'hidden') {
+          return;
+        }
+        
+        // Get element info
+        const tagName = el.tagName.toLowerCase();
+        const className = el.className || '';
+        const id = el.id || '';
+        const textContent = (el.textContent || '').trim().substring(0, 100);
+        
+        // Create unique selector
+        let elementSelector = tagName;
+        if (id) elementSelector += `#${id}`;
+        if (className && typeof className === 'string') {
+          const firstClass = className.split(' ')[0];
+          if (firstClass) elementSelector += `.${firstClass}`;
+        }
+        
+        // Enhanced component name detection
+        const getComponentName = (tagName: string, className: string, id: string, textContent: string) => {
+          // Check for common naming patterns in classes
+          if (className) {
+            const classes = className.split(' ');
+            for (const cls of classes) {
+              if (cls.includes('component') || cls.includes('Component')) return cls;
+              if (cls.includes('btn') && cls.includes('primary')) return 'PrimaryButton';
+              if (cls.includes('btn') && cls.includes('secondary')) return 'SecondaryButton';
+              if (cls.includes('btn') && cls.includes('outline')) return 'OutlineButton';
+              if (cls.includes('card')) return 'Card';
+              if (cls.includes('modal')) return 'Modal';
+              if (cls.includes('header')) return 'Header';
+              if (cls.includes('nav')) return 'Navigation';
+              if (cls.includes('hero')) return 'HeroSection';
+              if (cls.includes('footer')) return 'Footer';
+            }
+          }
+          
+          // Use element attributes for naming
+          if (id) return id;
+          if (el.getAttribute('aria-label')) return el.getAttribute('aria-label');
+          if (el.getAttribute('title')) return el.getAttribute('title');
+          
+          return tagName;
+        };
+
+        const elementData = {
+          id: `element-${elementIndex++}`,
+          type: tagName,
+          componentName: getComponentName(tagName, className, id, textContent),
+          selector: elementSelector,
+          text: textContent,
+          boundingBox: {
+            x: 0, // Will be calculated client-side
+            y: 0,
+            width: 0, 
+            height: 0
+          },
+          attributes: {
+            id: id || undefined,
+            className: className || undefined,
+            type: el.getAttribute('type') || undefined,
+            href: el.getAttribute('href') || undefined,
+            src: el.getAttribute('src') || undefined,
+            alt: el.getAttribute('alt') || undefined,
+            title: el.getAttribute('title') || undefined,
+            placeholder: el.getAttribute('placeholder') || undefined,
+            'aria-label': el.getAttribute('aria-label') || undefined,
+            'data-testid': el.getAttribute('data-testid') || undefined,
+            role: el.getAttribute('role') || undefined
+          },
+          context: {
+            parentTag: el.parentElement?.tagName.toLowerCase() || null,
+            parentClass: el.parentElement?.className || null,
+            siblingCount: el.parentElement?.children.length || 0,
+            indexInParent: Array.from(el.parentElement?.children || []).indexOf(el)
+          }
+        };
+        
+        // Filter out undefined attributes
+        Object.keys(elementData.attributes).forEach(key => {
+          if (elementData.attributes[key] === undefined) {
+            delete elementData.attributes[key];
+          }
+        });
+        
+        elements.push(elementData);
+        
+        // Add inspection data attributes to the element
+        el.setAttribute('data-celiador-element', JSON.stringify(elementData));
+        el.setAttribute('data-celiador-index', elementData.id);
+      });
+    });
+    
+    console.log(`🔍 [Inspection Overlay] Found ${elements.length} interactive elements`);
+    
+    // Rewrite relative URLs to point to original preview server using string replacement
+    let htmlString = dom.serialize();
+    
+    // Debug: Log a sample of the HTML to see what URLs actually exist
+    const sampleHtml = htmlString.substring(0, 2000);
+    console.log(`🔍 [Debug] Sample HTML before URL rewriting:`, sampleHtml);
+    
+    // Count matches before replacement
+    const nextHrefMatches = (htmlString.match(/href="(\/_next\/[^"]+)"/g) || []).length;
+    const nextSrcMatches = (htmlString.match(/src="(\/_next\/[^"]+)"/g) || []).length;
+    console.log(`🔍 [Debug] Found ${nextHrefMatches} href="_next" and ${nextSrcMatches} src="_next" matches`);
+    
+    // Replace all relative URLs with absolute URLs pointing to the original preview server
+    htmlString = htmlString.replace(/href="(\/_next\/[^"]+)"/g, `href="${originalPreviewUrl}$1"`);
+    htmlString = htmlString.replace(/src="(\/_next\/[^"]+)"/g, `src="${originalPreviewUrl}$1"`);
+    htmlString = htmlString.replace(/href='(\/_next\/[^']+)'/g, `href='${originalPreviewUrl}$1'`);
+    htmlString = htmlString.replace(/src='(\/_next\/[^']+)'/g, `src='${originalPreviewUrl}$1'`);
+    
+    // Also fix any other relative URLs that start with /
+    htmlString = htmlString.replace(/href="(\/[^"_][^"]*(?<!\/_next)[^"]*\.(css|js|ico|png|jpg|jpeg|svg|woff|woff2))"/g, `href="${originalPreviewUrl}$1"`);
+    htmlString = htmlString.replace(/src="(\/[^"_][^"]*(?<!\/_next)[^"]*\.(js|png|jpg|jpeg|svg|woff|woff2))"/g, `src="${originalPreviewUrl}$1"`);
+    
+    // Fix WebSocket connections and dynamic imports
+    const previewBaseUrl = originalPreviewUrl.replace('http://', '').replace('https://', ''); // Get host:port
+    htmlString = htmlString.replace(/'_next\/webpack-hmr'/g, `'ws://${previewBaseUrl}/_next/webpack-hmr'`);
+    htmlString = htmlString.replace(/"_next\/webpack-hmr"/g, `"ws://${previewBaseUrl}/_next/webpack-hmr"`);
+    
+    // Fix dynamic imports and chunk loading
+    htmlString = htmlString.replace(/__webpack_require__\.p\s*=\s*["'][^"']*["']/g, `__webpack_require__.p = "${originalPreviewUrl}/"`);
+    
+    console.log(`✅ [Inspection Overlay] Rewritten asset URLs and WebSocket connections for: ${originalPreviewUrl}`);
+    
+    // Add inspection overlay styles and script directly to the HTML string
+    const inspectionStyles = `
+<style id="celiador-inspection-styles">
+  [data-celiador-element] {
+    position: relative;
+    cursor: pointer !important;
+  }
+  
+  [data-celiador-element]:hover {
+    outline: 2px solid #3b82f6 !important;
+    outline-offset: -2px !important;
+    background-color: rgba(59, 130, 246, 0.1) !important;
+  }
+  
+  [data-celiador-element]:hover::after {
+    content: attr(data-celiador-type) " - " attr(data-celiador-text);
+    position: absolute;
+    top: -30px;
+    left: 0;
+    background: #3b82f6;
+    color: white;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    white-space: nowrap;
+    z-index: 10000;
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  
+  .celiador-inspection-active [data-celiador-element] {
+    pointer-events: auto !important;
+  }
+</style>`;
+
+    const inspectionScript = `
+<script id="celiador-inspection-script">
+  console.log('🎯 Celiador Server-Side Inspection Ready');
+  
+  // Add inspection class to body
+  document.body.classList.add('celiador-inspection-active');
+  
+  // Handle element clicks
+  document.addEventListener('click', function(event) {
+    const element = event.target.closest('[data-celiador-element]');
+    if (element) {
+      event.preventDefault();
+      event.stopPropagation();
+      
+      const elementData = JSON.parse(element.getAttribute('data-celiador-element') || '{}');
+      console.log('🎯 Celiador Element Clicked:', elementData);
+      
+      // Send element data to parent window (Celiador dashboard)
+      window.parent.postMessage({
+        type: 'ELEMENT_SELECTED',
+        element: elementData
+      }, '*');
+    }
+  });
+  
+  // Add hover data attributes for CSS tooltips
+  document.querySelectorAll('[data-celiador-element]').forEach(function(el, index) {
+    const data = JSON.parse(el.getAttribute('data-celiador-element') || '{}');
+    el.setAttribute('data-celiador-type', data.type || 'element');
+    el.setAttribute('data-celiador-text', (data.textContent || data.selector || '').substring(0, 50));
+  });
+  
+  console.log('🎯 Celiador Inspection Layer Active - ' + document.querySelectorAll('[data-celiador-element]').length + ' elements ready');
+</script>`;
+    
+    // Add base tag for proper URL resolution and insert styles before </head>
+    const baseTag = `<base href="${originalPreviewUrl}/">`;
+    const nextjsCompatScript = `
+<script>
+  // Fix Next.js runtime configuration for inspection mode
+  if (typeof window !== 'undefined') {
+    // Override fetch to use absolute URLs when needed
+    const originalFetch = window.fetch;
+    window.fetch = function(url, options) {
+      if (typeof url === 'string' && url.startsWith('/_next/')) {
+        url = '${originalPreviewUrl}' + url;
+      }
+      return originalFetch.call(this, url, options);
+    };
+    
+    // Override WebSocket constructor for HMR
+    const originalWebSocket = window.WebSocket;
+    window.WebSocket = function(url, protocols) {
+      if (typeof url === 'string' && url.includes('_next/webpack-hmr')) {
+        url = url.replace(/^ws:\/\/[^\/]+/, 'ws://${previewBaseUrl}');
+      }
+      return new originalWebSocket(url, protocols);
+    };
+  }
+</script>`;
+    
+    if (htmlString.includes('</head>')) {
+      htmlString = htmlString.replace('</head>', baseTag + nextjsCompatScript + inspectionStyles + '\n</head>');
+    }
+    
+    // Insert script before </body> in HTML string  
+    if (htmlString.includes('</body>')) {
+      htmlString = htmlString.replace('</body>', inspectionScript + '\n</body>');
+    } else {
+      // If no </body> tag, append at end
+      htmlString += inspectionScript;
+    }
+    
+    console.log('✅ [Inspection Overlay] Generated inspection overlay with server-side element detection and URL rewriting');
+    
+    return htmlString;
+    
+  } catch (error) {
+    console.error('❌ [Inspection Overlay] Error generating overlay:', error);
+    // Fallback: return original HTML with basic inspection layer
+    return originalHtml + `
+<script>
+  console.log('⚠️ Celiador Inspection - Fallback mode');
+  window.parent.postMessage({ type: 'INSPECTION_ERROR', error: 'Failed to generate overlay' }, '*');
+</script>`;
+  }
+}
+
+// Helper function to determine element type
+function getElementType(tagName: string, className: string, textContent: string): string {
+  if (tagName === 'button' || className.includes('btn') || className.includes('button')) {
+    return 'button';
+  }
+  if (tagName === 'input') return 'input';
+  if (tagName === 'a') return 'link';
+  if (tagName === 'nav') return 'navigation';
+  if (tagName === 'header') return 'header';
+  if (tagName === 'main') return 'main-content';
+  if (tagName === 'section') return 'section';
+  if (className.includes('card')) return 'card';
+  if (className.includes('menu')) return 'menu';
+  if (textContent.toLowerCase().includes('search')) return 'search';
+  return 'interactive-element';
+}
+
+// Recursive file listing helper function
+async function getAllFilesRecursively(supabaseService: any, basePath: string, currentPath = ''): Promise<any[]> {
+  const fullPath = currentPath ? `${basePath}/${currentPath}` : basePath;
+  
+  const { data, error } = await supabaseService.storage
+    .from('project-files')
+    .list(fullPath, {
+      limit: 1000,
+      offset: 0
+    });
+    
+  if (error) {
+    console.error(`Failed to list files at ${fullPath}:`, error);
+    return [];
+  }
+  
+  let allFiles: any[] = [];
+  
+  for (const item of data) {
+    if (!item.name) continue;
+    
+    const itemPath = currentPath ? `${currentPath}/${item.name}` : item.name;
+    
+    // Add the current item with its path
+    allFiles.push({
+      ...item,
+      fullPath: itemPath
+    });
+    
+    // If this is a directory (no metadata means it's a folder), recursively get its contents
+    if (!item.id && !item.metadata) {
+      const childFiles = await getAllFilesRecursively(supabaseService, basePath, itemPath);
+      allFiles.push(...childFiles);
+    }
+  }
+  
+  return allFiles;
+}
+
+// Build file tree from a cloned Git repository directory
+async function buildFileTreeFromDirectory(dirPath: string): Promise<any[]> {
+  const fsPromises = require('fs/promises');
+  const path = require('path');
+  
+  const skipPatterns = [
+    '.git',
+    'node_modules', 
+    '.next',
+    'dist',
+    'build',
+    '.DS_Store',
+    '*.log',
+    '.env.local',
+    'package-lock.json',
+    'yarn.lock'
+  ];
+
+  const shouldSkip = (filePath: string): boolean => {
+    const relativePath = path.relative(dirPath, filePath);
+    return skipPatterns.some(pattern => {
+      if (pattern.includes('*')) {
+        return relativePath.includes(pattern.replace('*', ''));
+      }
+      return relativePath.includes(pattern);
+    });
+  };
+
+  const buildTree = async (currentPath: string): Promise<any[]> => {
+    try {
+      const items = await fsPromises.readdir(currentPath, { withFileTypes: true });
+      const result: any[] = [];
+
+      for (const item of items) {
+        const fullPath = path.join(currentPath, item.name);
+        
+        if (shouldSkip(fullPath)) {
+          continue;
+        }
+
+        const relativePath = path.relative(dirPath, fullPath);
+
+        if (item.isDirectory()) {
+          const children = await buildTree(fullPath);
+          if (children.length > 0) { // Only include directories that have children
+            result.push({
+              name: item.name,
+              type: 'directory',
+              path: relativePath,
+              children
+            });
+          }
+        } else {
+          const stats = await fsPromises.stat(fullPath);
+          result.push({
+            name: item.name,
+            type: 'file',
+            path: relativePath,
+            size: stats.size,
+            updatedAt: stats.mtime
+          });
+        }
+      }
+
+      return result;
+    } catch (error) {
+      console.warn(`[GitFileTree] Error reading directory ${currentPath}: ${error}`);
+      return [];
+    }
+  };
+
+  return buildTree(dirPath);
+}
+
+// File management endpoints
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// =============================================================================
+// USER SETTINGS API
+// =============================================================================
+
+// Get user settings
+router.get('/api/settings', authenticateUser, async (req: any, res: any) => {
+  try {
+    const userId = req.user.id;
+    
+    let settings = await db.getUserSettings(userId);
+    
+    // If no settings exist, create default settings
+    if (!settings) {
+      settings = await db.createUserSettings(userId);
+    }
+    
+    res.json({ settings });
+  } catch (error) {
+    console.error('Failed to get user settings:', error);
+    res.status(500).json({ error: 'Failed to retrieve settings' });
+  }
+});
+
+// Update user settings
+router.put('/api/settings', authenticateUser, async (req: any, res: any) => {
+  try {
+    const userId = req.user.id;
+    const updates = req.body;
+    
+    // Validate required fields if provided
+    if (updates.theme && !['light', 'dark', 'system'].includes(updates.theme)) {
+      return res.status(400).json({ error: 'Invalid theme value' });
+    }
+    if (updates.ai_response_style && !['concise', 'balanced', 'detailed'].includes(updates.ai_response_style)) {
+      return res.status(400).json({ error: 'Invalid AI response style' });
+    }
+    if (updates.layout_density && !['compact', 'comfortable'].includes(updates.layout_density)) {
+      return res.status(400).json({ error: 'Invalid layout density' });
+    }
+    
+    // Validate numeric ranges
+    if (updates.editor_font_size && (updates.editor_font_size < 8 || updates.editor_font_size > 32)) {
+      return res.status(400).json({ error: 'Font size must be between 8 and 32' });
+    }
+    if (updates.editor_tab_size && (updates.editor_tab_size < 1 || updates.editor_tab_size > 8)) {
+      return res.status(400).json({ error: 'Tab size must be between 1 and 8' });
+    }
+    if (updates.sidebar_width && (updates.sidebar_width < 200 || updates.sidebar_width > 600)) {
+      return res.status(400).json({ error: 'Sidebar width must be between 200 and 600' });
+    }
+    if (updates.auto_save_interval && (updates.auto_save_interval < 5 || updates.auto_save_interval > 300)) {
+      return res.status(400).json({ error: 'Auto-save interval must be between 5 and 300 seconds' });
+    }
+    
+    let settings = await db.getUserSettings(userId);
+    
+    // If no settings exist, create them first
+    if (!settings) {
+      settings = await db.createUserSettings(userId);
+    }
+    
+    // Update settings
+    const updatedSettings = await db.updateUserSettings(userId, updates);
+    
+    res.json({ settings: updatedSettings });
+  } catch (error) {
+    console.error('Failed to update user settings:', error);
+    res.status(500).json({ error: 'Failed to update settings' });
+  }
+});
+
+// Reset user settings to defaults
+router.delete('/api/settings', authenticateUser, async (req: any, res: any) => {
+  try {
+    const userId = req.user.id;
+    
+    // Soft delete current settings
+    await supabaseService
+      .from('user_settings')
+      .update({ 
+        deleted_at: new Date().toISOString(),
+        deleter: userId 
+      })
+      .eq('user_id', userId)
+      .is('deleted_at', null);
+    
+    // Create new default settings
+    const settings = await db.createUserSettings(userId);
+    
+    res.json({ settings });
+  } catch (error) {
+    console.error('Failed to reset user settings:', error);
+    res.status(500).json({ error: 'Failed to reset settings' });
+  }
+});
+
+export default router;
