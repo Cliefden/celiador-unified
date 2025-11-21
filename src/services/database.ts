@@ -788,7 +788,7 @@ class DatabaseService {
       const { data, error } = await this.supabaseService
         .from('templates')
         .select('*')
-        .eq('template_key', templateKey)
+        .eq('storage_path', templateKey)
         .single();
       
       if (error) {

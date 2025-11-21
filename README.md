@@ -56,4 +56,4 @@ npm start      # Production server
 
 ## Deployment
 
-This service is designed for Railway deployment via git subtree from the parent monorepo.
+This service is designed for Railway deployment via git subtree from the parent monorepo.# Deployment trigger Fri Nov 21 12:28:02 CET 2025
