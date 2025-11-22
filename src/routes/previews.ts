@@ -531,7 +531,7 @@ const handleProxyRequest = async (req: any, res: any) => {
     console.log(`🚀 [Preview Proxy] Proxying to: ${targetUrl}`);
 
     // Forward the request to the preview server
-    const fetch = (await import('node-fetch')).default;
+    // Use native fetch (Node.js 18+) or fallback to node-fetch
     const response = await fetch(targetUrl, {
       method: req.method,
       headers: {
@@ -1163,7 +1163,7 @@ router.get('/projects/:id/preview/:previewId/inspection', async (req: any, res: 
     console.log(`📝 [Inspection Preview] Updated last accessed path to: ${pathToInspect}`);
     
     // Fetch original HTML from preview for the specific path
-    const fetch = (await import('node-fetch')).default;
+    // Use native fetch (Node.js 18+)
     
     // Ensure pathToInspect starts with / and construct proper URL
     const normalizedPath = pathToInspect.startsWith('/') ? pathToInspect : `/${pathToInspect}`;
@@ -1492,7 +1492,7 @@ router.get('/_next/*', async (req: any, res: any) => {
     const targetUrl = `${preview.internalUrl}${targetPath}`;
     console.log(`🚀 [Preview Fallback] Proxying to: ${targetUrl}`);
 
-    const fetch = (await import('node-fetch')).default;
+    // Use native fetch (Node.js 18+)
     const response = await fetch(targetUrl, {
       method: req.method,
       headers: {
@@ -1572,7 +1572,7 @@ router.get('/*', async (req: any, res: any) => {
     const targetUrl = `${preview.internalUrl}${path}`;
     console.log(`🚀 [Preview Navigation] Proxying to: ${targetUrl}`);
 
-    const fetch = (await import('node-fetch')).default;
+    // Use native fetch (Node.js 18+)
     const response = await fetch(targetUrl, {
       method: req.method,
       headers: {
