@@ -280,11 +280,21 @@ export class WebSocketService {
         this.sendInitialData(ws, user.id);
       } else {
         console.log('❌ WebSocket authentication failed');
-        ws.close(1008, 'Invalid token');
+        // Send authentication failed message before closing
+        ws.send(JSON.stringify({ 
+          type: 'authentication_failed', 
+          message: 'Token expired or invalid' 
+        }));
+        setTimeout(() => ws.close(1008, 'Invalid token'), 100);
       }
     } catch (error) {
       console.error('❌ WebSocket authentication error:', error);
-      ws.close(1011, 'Authentication error');
+      // Send authentication failed message before closing
+      ws.send(JSON.stringify({ 
+        type: 'authentication_failed', 
+        message: 'Authentication error occurred' 
+      }));
+      setTimeout(() => ws.close(1011, 'Authentication error'), 100);
     }
   }
 
