@@ -70,7 +70,6 @@ router.post('/api/sessions/start', authenticateUser, async (req: any, res: any) 
       .from('user_sessions')
       .insert({
         user_id: userId,
-        profile_id: userId, // Use the same user ID for profile_id
         session_id: sessionId,
         platform: platform,
         device_info: deviceInfo,
