@@ -67,7 +67,7 @@ router.post('/api/sessions/start', authenticateUser, async (req: any, res: any) 
     // Create new session record
     const now = new Date().toISOString();
     const { data: session, error } = await supabaseService
-      .from('sessions')
+      .from('user_sessions')
       .insert({
         user_id: userId,
         profile_id: userId, // Use the same user ID for profile_id
@@ -125,7 +125,7 @@ router.post('/api/sessions/heartbeat', authenticateUser, async (req: any, res: a
 
     // Update session heartbeat and activity
     const { data: session, error } = await supabaseService
-      .from('sessions')
+      .from('user_sessions')
       .update({
         last_heartbeat_at: new Date().toISOString(),
         last_activity_at: new Date().toISOString(),
@@ -174,7 +174,7 @@ router.post('/api/sessions/end', authenticateUser, async (req: any, res: any) =>
 
     // Get current session to calculate duration
     const { data: currentSession, error: fetchError } = await supabaseService
-      .from('sessions')
+      .from('user_sessions')
       .select('started_at')
       .eq('session_id', sessionId)
       .eq('user_id', userId)
@@ -191,7 +191,7 @@ router.post('/api/sessions/end', authenticateUser, async (req: any, res: any) =>
 
     // Update session to ended
     const { data: session, error } = await supabaseService
-      .from('sessions')
+      .from('user_sessions')
       .update({
         status: 'ended',
         ended_at: endTime.toISOString(),
@@ -241,7 +241,7 @@ router.get('/api/sessions/active', authenticateUser, async (req: any, res: any) 
 
     // Get user's active sessions
     const { data: sessions, error } = await supabaseService
-      .from('sessions')
+      .from('user_sessions')
       .select('*')
       .eq('user_id', userId)
       .eq('status', 'active')
@@ -296,7 +296,7 @@ router.get('/api/sessions/history', authenticateUser, async (req: any, res: any)
 
     // Build query
     let query = supabaseService
-      .from('sessions')
+      .from('user_sessions')
       .select('*')
       .eq('user_id', userId)
       .order('started_at', { ascending: false })
@@ -352,7 +352,7 @@ router.get('/api/sessions/analytics', authenticateUser, async (req: any, res: an
 
     // Get sessions from last N days
     const { data: sessions, error } = await supabaseService
-      .from('sessions')
+      .from('user_sessions')
       .select('*')
       .eq('user_id', userId)
       .gte('started_at', new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString())
