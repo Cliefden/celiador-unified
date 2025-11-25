@@ -1083,7 +1083,7 @@ function generateEnhancedSelector(el: any): string {
     // Add meaningful classes
     if (current.className) {
       const classes = current.className.split(/\s+/)
-        .filter(cls => cls && !cls.includes('celiador'))
+        .filter((cls: string) => cls && !cls.includes('celiador'))
         .slice(0, 2); // Limit to 2 most relevant classes
       if (classes.length > 0) {
         selector += '.' + classes.join('.');

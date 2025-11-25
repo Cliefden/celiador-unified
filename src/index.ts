@@ -173,7 +173,7 @@ app.use('/', fileRoutes);
 app.use('/', integrationRoutes);
 app.use('/', jobRoutes);
 app.use('/backups', backupRoutes);
-app.use('/', templateRoutes);
+app.use('/api/templates', templateRoutes);
 
 // Mount templates route BEFORE previews to avoid catch-all route conflicts
 app.get('/templates', async (req: any, res: any) => {

@@ -44,17 +44,23 @@ router.post('/api/sessions/start', authenticateUser, async (req: any, res: any) 
     const getClientIP = (ip: string | undefined) => {
       if (!ip) return null;
       
+      // Handle IPv4-mapped IPv6 addresses (e.g., ::ffff:127.0.0.1)
+      if (ip.startsWith('::ffff:')) {
+        return null; // Skip IPv4-mapped IPv6 for privacy
+      }
+      
+      // Handle local addresses
+      if (ip === '::1' || ip === '127.0.0.1' || ip === 'localhost') {
+        return null;
+      }
+      
       // Handle IPv4 addresses (e.g., 192.168.1.123 -> 192.168.1.xxx)
-      if (ip.includes('.')) {
+      if (ip.includes('.') && !ip.includes(':')) {
         return ip.replace(/\d+$/, 'xxx');
       }
       
-      // Handle IPv6 addresses (e.g., ::1 -> ::xxx or 2001:db8::1 -> 2001:db8::xxx)
-      if (ip.includes(':')) {
-        // For local IPv6 (::1), just return null to avoid invalid format
-        if (ip === '::1' || ip === '::') {
-          return null;
-        }
+      // Handle pure IPv6 addresses (e.g., 2001:db8::1 -> 2001:db8::xxx)
+      if (ip.includes(':') && !ip.includes('.')) {
         // For other IPv6, mask the last segment
         return ip.replace(/[^:]+$/, 'xxx');
       }
@@ -64,8 +70,7 @@ router.post('/api/sessions/start', authenticateUser, async (req: any, res: any) 
     
     const clientIP = getClientIP(req.ip);
 
-    // Create new session record
-    const now = new Date().toISOString();
+    // Create new session record (let database set timestamps with defaults)
     const { data: session, error } = await supabaseService
       .from('user_sessions')
       .insert({
@@ -75,11 +80,8 @@ router.post('/api/sessions/start', authenticateUser, async (req: any, res: any) 
         device_info: deviceInfo,
         location_info: locationInfo,
         user_agent: userAgent,
-        ip_address: clientIP,
-        status: 'active',
-        started_at: now,
-        last_activity_at: now,
-        last_heartbeat_at: now
+        ip_address: clientIP
+        // status, started_at, last_activity_at, last_heartbeat_at, created_at, updated_at use defaults
       })
       .select()
       .single();
