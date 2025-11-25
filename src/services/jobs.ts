@@ -518,70 +518,83 @@ export class JobService {
     console.log(`📥 [TEMPLATE DOWNLOAD] Starting download of template '${templateKey}' to '${templateDir}'`);
     
     try {
-      // List all files for this template in Supabase Storage (project-templates bucket)
-      const { data: files, error: listError } = await this.supabaseService.storage
-        .from('project-templates')
-        .list(templateKey, { limit: 1000, sortBy: { column: 'name', order: 'asc' } });
+      // Recursively download all files from the template directory in storage
+      const downloadedCount = { count: 0 };
+      await this.downloadTemplateDirectory(templateKey, '', templateDir, downloadedCount);
 
-      if (listError) {
-        console.error(`❌ [TEMPLATE DOWNLOAD] Failed to list template files:`, listError);
-        return false;
-      }
-
-      if (!files || files.length === 0) {
-        console.warn(`⚠️ [TEMPLATE DOWNLOAD] No files found for template '${templateKey}' in project-templates bucket`);
-        return false;
-      }
-
-      console.log(`📁 [TEMPLATE DOWNLOAD] Found ${files.length} files for template '${templateKey}'`);
-
-      // Create template directory
-      await fs.mkdir(templateDir, { recursive: true });
-
-      // Download each file and recreate directory structure
-      let downloadedCount = 0;
-      for (const file of files) {
-        try {
-          // Skip directories (they have size 0 and no extension)
-          if (file.name.endsWith('/') || !file.name.includes('.')) {
-            continue;
-          }
-
-          const filePath = path.join(templateDir, file.name);
-          const fileDir = path.dirname(filePath);
-
-          // Create directory structure
-          await fs.mkdir(fileDir, { recursive: true });
-
-          // Download file content
-          const { data: fileData, error: downloadError } = await this.supabaseService.storage
-            .from('project-templates')
-            .download(`${templateKey}/${file.name}`);
-
-          if (downloadError) {
-            console.error(`❌ [TEMPLATE DOWNLOAD] Failed to download ${file.name}:`, downloadError);
-            continue;
-          }
-
-          // Convert blob to text
-          const fileContent = await fileData.text();
-
-          // Write file to local filesystem
-          await fs.writeFile(filePath, fileContent, 'utf-8');
-          downloadedCount++;
-          console.log(`✅ [TEMPLATE DOWNLOAD] Downloaded: ${file.name}`);
-
-        } catch (fileError) {
-          console.error(`❌ [TEMPLATE DOWNLOAD] Error processing file ${file.name}:`, fileError);
-        }
-      }
-
-      console.log(`🎉 [TEMPLATE DOWNLOAD] Successfully downloaded ${downloadedCount} files for template '${templateKey}'`);
-      return downloadedCount > 0;
+      console.log(`🎉 [TEMPLATE DOWNLOAD] Successfully downloaded ${downloadedCount.count} files for template '${templateKey}'`);
+      return downloadedCount.count > 0;
 
     } catch (error) {
       console.error(`❌ [TEMPLATE DOWNLOAD] Failed to download template '${templateKey}':`, error);
       return false;
+    }
+  }
+
+  /**
+   * Recursively download files and directories from Supabase Storage
+   */
+  private async downloadTemplateDirectory(templateKey: string, subPath: string, localDir: string, downloadedCount: { count: number }): Promise<void> {
+    try {
+      const storagePrefix = subPath ? `${templateKey}/${subPath}` : templateKey;
+      
+      // List all items in this directory level
+      const { data: items, error: listError } = await this.supabaseService.storage
+        .from('project-templates')
+        .list(storagePrefix, { limit: 1000, sortBy: { column: 'name', order: 'asc' } });
+
+      if (listError) {
+        console.error(`❌ [TEMPLATE DOWNLOAD] Failed to list directory ${storagePrefix}:`, listError);
+        return;
+      }
+
+      if (!items || items.length === 0) {
+        return;
+      }
+
+      // Create local directory
+      await fs.mkdir(localDir, { recursive: true });
+
+      for (const item of items) {
+        try {
+          const itemName = item.name;
+          const itemStoragePath = subPath ? `${subPath}/${itemName}` : itemName;
+          const itemLocalPath = path.join(localDir, itemName);
+
+          // Check if this is a directory (has no file extension and might be a folder)
+          if (!itemName.includes('.') && item.metadata?.size === undefined) {
+            // This is likely a directory, recurse into it
+            console.log(`📁 [TEMPLATE DOWNLOAD] Entering directory: ${itemStoragePath}`);
+            await this.downloadTemplateDirectory(templateKey, itemStoragePath, itemLocalPath, downloadedCount);
+          } else {
+            // This is a file, download it
+            const fullStoragePath = `${templateKey}/${itemStoragePath}`;
+            
+            const { data: fileData, error: downloadError } = await this.supabaseService.storage
+              .from('project-templates')
+              .download(fullStoragePath);
+
+            if (downloadError) {
+              console.error(`❌ [TEMPLATE DOWNLOAD] Failed to download ${fullStoragePath}:`, downloadError);
+              continue;
+            }
+
+            // Create parent directory if it doesn't exist
+            const parentDir = path.dirname(itemLocalPath);
+            await fs.mkdir(parentDir, { recursive: true });
+
+            // Convert blob to text and write file
+            const fileContent = await fileData.text();
+            await fs.writeFile(itemLocalPath, fileContent, 'utf-8');
+            downloadedCount.count++;
+            console.log(`✅ [TEMPLATE DOWNLOAD] Downloaded: ${itemStoragePath}`);
+          }
+        } catch (itemError) {
+          console.error(`❌ [TEMPLATE DOWNLOAD] Error processing item ${item.name}:`, itemError);
+        }
+      }
+    } catch (error) {
+      console.error(`❌ [TEMPLATE DOWNLOAD] Error in directory ${subPath}:`, error);
     }
   }
 }
