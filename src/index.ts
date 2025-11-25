@@ -30,6 +30,7 @@ import userRoutes from './routes/user.js';
 import sessionRoutes from './routes/sessions.js';
 import deploymentRoutes from './routes/deployments.js';
 import realtimeRoutes from './routes/realtime.js';
+import templateRoutes from './routes/templates.js';
 import { createEcosystemRoutes } from './routes/ecosystem.js';
 
 const app = express();
@@ -172,6 +173,7 @@ app.use('/', fileRoutes);
 app.use('/', integrationRoutes);
 app.use('/', jobRoutes);
 app.use('/backups', backupRoutes);
+app.use('/', templateRoutes);
 
 // Mount templates route BEFORE previews to avoid catch-all route conflicts
 app.get('/templates', async (req: any, res: any) => {

@@ -812,8 +812,8 @@ export const fileService = {
     if (!_fileService) _fileService = new UnifiedFileService();
     return _fileService.migrateStorageFilesToDatabase(projectId, userId);
   },
-  saveFile: async (filePath: string, content: string, projectId: string, userId: string) => {
+  saveFile: async (projectId: string, filePath: string, content: string, userId: string) => {
     if (!_fileService) _fileService = new UnifiedFileService();
-    return _fileService.saveFile(filePath, content, projectId, userId);
+    return _fileService.saveFile(projectId, filePath, content, userId);
   }
 };

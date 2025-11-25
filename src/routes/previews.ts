@@ -756,209 +756,8 @@ const handleProxyRequest = async (req: any, res: any) => {
         </script>
       `;
 
-      // Add inspection script for same-origin iframe access
-      const inspectionScript = `
-        <script>
-          console.log('🎯 [Celiador Inspection] Setting up inspection system');
-          
-          // Inspection system for same-origin iframe
-          class CeliadorInspector {
-            constructor() {
-              this.isEnabled = false;
-              this.elements = [];
-              this.setupMessageListener();
-            }
-            
-            setupMessageListener() {
-              window.addEventListener('message', (event) => {
-                if (event.origin !== window.location.origin) return;
-                
-                if (event.data.type === 'ENABLE_INSPECTION') {
-                  console.log('🎯 [Celiador Inspection] Enabling inspection mode');
-                  this.enableInspection();
-                } else if (event.data.type === 'DISABLE_INSPECTION') {
-                  console.log('🎯 [Celiador Inspection] Disabling inspection mode');
-                  this.disableInspection();
-                }
-              });
-            }
-            
-            enableInspection() {
-              this.isEnabled = true;
-              this.mapDOMElements();
-              this.sendElementsToParent();
-            }
-            
-            disableInspection() {
-              this.isEnabled = false;
-              this.elements = [];
-            }
-            
-            mapDOMElements() {
-              console.log('🔍 [Celiador Inspection] Mapping DOM elements');
-              
-              const selectors = [
-                'button',
-                'input:not([type="hidden"])',
-                'select',
-                'textarea',
-                'a[href]:not([href="#"]):not([href^="javascript:"])',
-                '[onclick]',
-                '[role="button"]',
-                'nav',
-                'header',
-                'main',
-                'section',
-                'div[class*="button"]:not(.celiador-inspection-overlay)',
-                'div[class*="link"]:not(.celiador-inspection-overlay)',
-                'span[class*="button"]:not(.celiador-inspection-overlay)',
-                'span[class*="link"]:not(.celiador-inspection-overlay)'
-              ];
-              
-              this.elements = [];
-              
-              selectors.forEach((selector, selectorIndex) => {
-                try {
-                  const foundElements = document.querySelectorAll(selector);
-                  foundElements.forEach((el, elementIndex) => {
-                    // Skip hidden elements
-                    const computedStyle = window.getComputedStyle(el);
-                    if (computedStyle.display === 'none' || 
-                        computedStyle.visibility === 'hidden' ||
-                        el.offsetWidth === 0 || 
-                        el.offsetHeight === 0) {
-                      return;
-                    }
-                    
-                    // Skip our own inspection elements
-                    if (el.classList.contains('celiador-inspection-overlay') || 
-                        el.id?.includes('celiador')) {
-                      return;
-                    }
-                    
-                    const rect = el.getBoundingClientRect();
-                    if (rect.width < 10 || rect.height < 10) return; // Skip tiny elements
-                    
-                    const tagName = el.tagName.toLowerCase();
-                    const className = el.className || '';
-                    const textContent = el.textContent?.trim() || '';
-                    const id = el.id || '';
-                    
-                    // Determine element type
-                    let elementType = 'unknown';
-                    if (tagName === 'button' || el.getAttribute('role') === 'button') {
-                      elementType = 'button';
-                    } else if (tagName === 'a') {
-                      elementType = 'link';
-                    } else if (['input', 'select', 'textarea'].includes(tagName)) {
-                      elementType = 'form-field';
-                    } else if (['nav', 'header', 'main', 'section'].includes(tagName)) {
-                      elementType = 'layout';
-                    } else if (className.includes('button') || className.includes('btn')) {
-                      elementType = 'interactive';
-                    } else {
-                      elementType = 'content';
-                    }
-                    
-                    const elementData = {
-                      id: \`\${tagName}_\${selectorIndex}_\${elementIndex}\`,
-                      type: elementType,
-                      tagName: tagName,
-                      selector: this.generateSelector(el),
-                      componentName: this.guessComponentName(el),
-                      boundingBox: {
-                        x: rect.left,
-                        y: rect.top,
-                        width: rect.width,
-                        height: rect.height
-                      },
-                      metadata: {
-                        id: id,
-                        className: className,
-                        textContent: textContent.substring(0, 100),
-                        props: this.extractProps(el),
-                        fromRealInspection: true
-                      }
-                    };
-                    
-                    this.elements.push(elementData);
-                  });
-                } catch (error) {
-                  console.warn('Error processing selector:', selector, error);
-                }
-              });
-              
-              console.log(\`🎯 [Celiador Inspection] Found \${this.elements.length} elements\`);
-            }
-            
-            generateSelector(element) {
-              if (element.id) return \`#\${element.id}\`;
-              
-              if (element.className) {
-                const classes = element.className.split(' ')
-                  .filter(cls => cls && !cls.startsWith('_'))
-                  .slice(0, 2)
-                  .join('.');
-                if (classes) return \`\${element.tagName.toLowerCase()}.\${classes}\`;
-              }
-              
-              return element.tagName.toLowerCase();
-            }
-            
-            guessComponentName(element) {
-              const testId = element.getAttribute('data-testid');
-              if (testId) return testId;
-              
-              const component = element.getAttribute('data-component');
-              if (component) return component;
-              
-              if (element.tagName === 'BUTTON') {
-                const text = element.textContent?.trim();
-                if (text && text.length < 20) {
-                  return text.replace(/\\s+/g, '') + 'Button';
-                }
-              }
-              
-              return element.tagName;
-            }
-            
-            extractProps(element) {
-              const props = {};
-              ['id', 'className', 'type', 'placeholder', 'value', 'href'].forEach(attr => {
-                const value = element.getAttribute(attr);
-                if (value) props[attr] = value;
-              });
-              
-              const text = element.textContent?.trim();
-              if (text && text.length < 50) {
-                props.textContent = text;
-              }
-              
-              return props;
-            }
-            
-            sendElementsToParent() {
-              if (window.parent !== window) {
-                console.log(\`🎯 [Celiador Inspection] Sending \${this.elements.length} elements to parent\`);
-                window.parent.postMessage({
-                  type: 'ELEMENTS_MAPPED',
-                  elements: this.elements,
-                  timestamp: Date.now()
-                }, window.location.origin);
-              }
-            }
-          }
-          
-          // Initialize inspector
-          const inspector = new CeliadorInspector();
-          window.celiadorInspector = inspector;
-          
-          console.log('✅ [Celiador Inspection] Inspector initialized and ready');
-        </script>
-      `;
-
-      // Inject all scripts before the closing head tag or body tag  
-      const combinedScript = webpackOverrideScript + navigationTrackingScript + inspectionScript;
+      // Inject webpack and navigation scripts only (no inspection script)
+      const combinedScript = webpackOverrideScript + navigationTrackingScript;
       if (responseBody.includes('</head>')) {
         responseBody = responseBody.replace('</head>', combinedScript + '</head>');
       } else if (responseBody.includes('</body>')) {
@@ -1002,6 +801,19 @@ function getFileContentType(path: string): string {
   return types[ext || ''] || 'text/plain';
 }
 
+// INSPECTION ROUTE MOVED HERE TO PREVENT PROXY WILDCARD FROM INTERCEPTING
+
+// OPTIONS handler for inspection endpoint (CORS preflight)
+router.options('/projects/:id/preview/:previewId/inspection', (req: any, res: any) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('X-Frame-Options', 'ALLOWALL');
+  res.setHeader('Content-Security-Policy', "frame-ancestors 'self' https://*.vercel.app https://localhost:* http://localhost:*");
+  res.status(200).end();
+});
+
+
 // Register both routes - root and wildcard paths (unified handler for content and assets)
 router.get('/projects/:id/preview/:previewId/proxy', handleProxyRequest);
 router.get('/projects/:id/preview/:previewId/proxy/*', handleProxyRequest);
@@ -1019,16 +831,6 @@ router.post('/projects/:id/preview/:previewId/clear-cache', async (req: any, res
   lastAccessedPaths.delete(previewId);
   console.log(`🗑️ [Clear Cache] After clear:`, Array.from(lastAccessedPaths.entries()));
   res.json({ success: true, message: 'Cache cleared' });
-});
-
-// OPTIONS handler for inspection endpoint (CORS preflight)
-router.options('/projects/:id/preview/:previewId/inspection', (req: any, res: any) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  res.setHeader('X-Frame-Options', 'ALLOWALL');
-  res.setHeader('Content-Security-Policy', "frame-ancestors 'self' https://*.vercel.app https://localhost:* http://localhost:*");
-  res.status(200).end();
 });
 
 // Get last accessed path for a preview
@@ -1052,7 +854,10 @@ router.post('/projects/:id/preview/:previewId/set-path', async (req: any, res: a
 
 // Inspection preview endpoint - generates server-side inspection overlay using JSDOM
 router.get('/projects/:id/preview/:previewId/inspection', async (req: any, res: any) => {
-  console.log(`🔍 [Inspection Preview] Request for project ${req.params.id}, preview ${req.params.previewId}`);
+  console.log(`🔍 [INSPECTION ENDPOINT HIT] Request for project ${req.params.id}, preview ${req.params.previewId}`);
+  console.log(`🔍 [INSPECTION ENDPOINT HIT] Full URL: ${req.url}`);
+  console.log(`🔍 [Inspection Preview] Query params:`, req.query);
+  console.log(`🔍 [Inspection Preview] Cache-busting timestamp:`, req.query._t);
   
   // Handle authentication via query parameter for iframe requests
   const token = req.query.token;
@@ -1197,6 +1002,11 @@ router.get('/projects/:id/preview/:previewId/inspection', async (req: any, res: 
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     
+    // Force cache refresh for inspection endpoint
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    
     res.send(inspectionHtml);
     
   } catch (error) {
@@ -1211,6 +1021,163 @@ router.get('/projects/:id/preview/:previewId/inspection', async (req: any, res: 
     `);
   }
 });
+
+// Helper function to guess component name from element context
+function guessComponentName(el: any, textContent: string, className: string): string {
+  // Try data attributes first
+  const testId = el.getAttribute('data-testid');
+  if (testId) return testId;
+  
+  const component = el.getAttribute('data-component');
+  if (component) return component;
+  
+  // Try to extract from class names (common React patterns)
+  if (className) {
+    // Look for component-like class names
+    const componentMatch = className.match(/([A-Z][a-zA-Z]*(?:Component|Button|Input|Form|Card|Modal|Dialog))/);
+    if (componentMatch) return componentMatch[1];
+    
+    // Look for BEM or styled-component patterns
+    const bemMatch = className.match(/^([a-z]+(?:-[a-z]+)*)/);
+    if (bemMatch) return `${bemMatch[1]}Component`;
+  }
+  
+  // Fallback based on element type and content
+  if (el.tagName === 'BUTTON') {
+    const text = textContent.trim().replace(/\s+/g, '');
+    if (text && text.length < 20) {
+      return `${text.charAt(0).toUpperCase() + text.slice(1)}Button`;
+    }
+    return 'Button';
+  } else if (el.tagName === 'A') {
+    return 'Link';
+  } else if (el.tagName === 'INPUT') {
+    const type = el.getAttribute('type') || 'text';
+    return `${type.charAt(0).toUpperCase() + type.slice(1)}Input`;
+  } else if (el.tagName === 'NAV') {
+    return 'Navigation';
+  } else if (el.tagName === 'HEADER') {
+    return 'Header';
+  } else if (el.tagName === 'MAIN') {
+    return 'MainContent';
+  }
+  
+  return el.tagName.toLowerCase();
+}
+
+// Generate enhanced CSS selector with better specificity
+function generateEnhancedSelector(el: any): string {
+  const path = [];
+  let current = el;
+  
+  while (current && current.tagName && current.tagName !== 'BODY') {
+    let selector = current.tagName.toLowerCase();
+    
+    // Add ID if available
+    if (current.id) {
+      selector += `#${current.id}`;
+      path.unshift(selector);
+      break; // ID is unique, we can stop here
+    }
+    
+    // Add meaningful classes
+    if (current.className) {
+      const classes = current.className.split(/\s+/)
+        .filter(cls => cls && !cls.includes('celiador'))
+        .slice(0, 2); // Limit to 2 most relevant classes
+      if (classes.length > 0) {
+        selector += '.' + classes.join('.');
+      }
+    }
+    
+    // Add nth-child for specificity if no unique identifiers
+    if (!current.id && !current.className) {
+      const siblings = Array.from(current.parentNode?.children || []);
+      const index = siblings.indexOf(current) + 1;
+      if (index > 1) {
+        selector += `:nth-child(${index})`;
+      }
+    }
+    
+    path.unshift(selector);
+    current = current.parentElement;
+  }
+  
+  return path.join(' > ');
+}
+
+// Extract React/Next.js specific information
+function extractReactInformation(className: string, textContent: string): any {
+  const info: any = {
+    isNextjsComponent: false,
+    isTailwindStyled: false,
+    possibleFramework: 'unknown'
+  };
+  
+  if (className) {
+    // Check for Tailwind CSS classes
+    if (className.match(/(^|\s)(bg-|text-|p-|m-|flex|grid|w-|h-)/)) {
+      info.isTailwindStyled = true;
+      info.possibleFramework = 'tailwind';
+    }
+    
+    // Check for CSS modules patterns
+    if (className.match(/_[a-zA-Z0-9]+/)) {
+      info.isCSSModules = true;
+      info.possibleFramework = 'css-modules';
+    }
+    
+    // Check for styled-components patterns
+    if (className.match(/^[a-z]+-[A-Za-z0-9]+/)) {
+      info.isStyledComponents = true;
+      info.possibleFramework = 'styled-components';
+    }
+  }
+  
+  return info;
+}
+
+// Get semantic context about the element's purpose
+function getSemanticContext(el: any, textContent: string, className: string): any {
+  const context: any = {
+    purpose: 'unknown',
+    interactive: false,
+    formRelated: false
+  };
+  
+  // Determine semantic purpose
+  if (el.tagName === 'BUTTON' || el.getAttribute('role') === 'button') {
+    context.purpose = 'action';
+    context.interactive = true;
+    
+    // Classify button type by text content
+    const text = textContent.toLowerCase();
+    if (text.includes('submit') || text.includes('save') || text.includes('send')) {
+      context.actionType = 'submit';
+    } else if (text.includes('cancel') || text.includes('close') || text.includes('dismiss')) {
+      context.actionType = 'cancel';
+    } else if (text.includes('delete') || text.includes('remove')) {
+      context.actionType = 'destructive';
+    } else if (text.includes('edit') || text.includes('modify')) {
+      context.actionType = 'edit';
+    } else if (text.includes('add') || text.includes('create') || text.includes('new')) {
+      context.actionType = 'create';
+    }
+  } else if (el.tagName === 'A') {
+    context.purpose = 'navigation';
+    context.interactive = true;
+  } else if (['INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName)) {
+    context.purpose = 'input';
+    context.interactive = true;
+    context.formRelated = true;
+  } else if (['NAV', 'HEADER', 'MAIN', 'ASIDE', 'FOOTER'].includes(el.tagName)) {
+    context.purpose = 'layout';
+  } else if (textContent.length > 50) {
+    context.purpose = 'content';
+  }
+  
+  return context;
+}
 
 // Generate inspection overlay HTML with clickable elements using JSDOM
 async function generateInspectionOverlay(originalHtml: string, projectId: string, previewId: string, originalPreviewUrl: string): Promise<string> {
@@ -1282,19 +1249,51 @@ async function generateInspectionOverlay(originalHtml: string, projectId: string
           elementType = 'text';
         }
         
+        // Enhanced component name detection
+        const componentName = guessComponentName(el, textContent, className);
+        
+        // Generate more comprehensive CSS selector
+        const enhancedSelector = generateEnhancedSelector(el);
+        
+        // Capture all attributes for better context
+        const allAttributes: Record<string, string> = {};
+        Array.from(el.attributes).forEach(attr => {
+          allAttributes[attr.name] = attr.value;
+        });
+        
+        // Capture parent context for better AI understanding
+        const parentElement = el.parentElement;
+        const parentContext = parentElement ? {
+          tagName: parentElement.tagName.toLowerCase(),
+          className: parentElement.className || '',
+          id: parentElement.id || '',
+          role: parentElement.getAttribute('role')
+        } : null;
+        
+        // Extract React/Next.js specific information from classes
+        const reactInfo = extractReactInformation(className, textContent);
+        
         const elementData = {
           id: `${tagName}_${selectorIndex}_${elementIndex}`,
           type: elementType,
           tagName: tagName,
           className: className,
-          textContent: textContent.substring(0, 100),
-          selector: selector,
-          attributes: {
-            id: id,
-            href: el.getAttribute('href'),
-            type: el.getAttribute('type'),
-            role: el.getAttribute('role'),
-            'aria-label': el.getAttribute('aria-label')
+          textContent: textContent.substring(0, 200), // More text context
+          selector: enhancedSelector,
+          componentName: componentName,
+          boundingBox: {
+            // Note: These will be calculated on the client side as JSDOM doesn't have layout info
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0
+          },
+          attributes: allAttributes,
+          styles: {}, // Will be populated on client side
+          context: {
+            parent: parentContext,
+            reactInfo: reactInfo,
+            semantic: getSemanticContext(el, textContent, className)
           }
         };
         
@@ -1381,24 +1380,106 @@ async function generateInspectionOverlay(originalHtml: string, projectId: string
   }
 </style>`;
 
+    const timestamp = Date.now();
+    console.log(`🔍 [Inspection Overlay] Adding enhanced inspection script with timestamp: ${timestamp}`);
+    
     const inspectionScript = `
-<script id="celiador-inspection-script">
-  console.log('🎯 Celiador Server-Side Inspection Ready');
+<script id="celiador-inspection-script-${timestamp}">
+  console.log('🎯 Celiador Server-Side Inspection Ready - ENHANCED VERSION v3.1 - Timestamp: ${timestamp}');
+  console.log('🎯 DEBUG: Script timestamp:', '${timestamp}');
+  console.log('🎯 DEBUG: document.body available:', !!document.body);
+  console.log('🎯 DEBUG: window object available:', !!window);
+  console.log('🎯 DEBUG: Current URL:', window.location.href);
+  console.log('🎯 DEBUG: Elements with data-celiador-element:', document.querySelectorAll('[data-celiador-element]').length);
   
   // Add inspection class to body
   document.body.classList.add('celiador-inspection-active');
+  console.log('🎯 DEBUG: Added inspection class to body');
   
   // Handle element clicks
   document.addEventListener('click', function(event) {
+    console.log('🎯 DEBUG v3.0: Click event triggered on:', event.target);
+    console.log('🎯 DEBUG v3.0: Target tag:', event.target.tagName);
+    console.log('🎯 DEBUG v3.0: Target classes:', event.target.className);
+    
     const element = event.target.closest('[data-celiador-element]');
+    console.log('🎯 DEBUG v3.0: Found element with data-celiador-element:', !!element);
+    
     if (element) {
+      console.log('🎯 DEBUG v3.0: Processing click on element:', element);
+      console.log('🎯 DEBUG v3.0: Element data attribute:', element.getAttribute('data-celiador-element'));
       event.preventDefault();
       event.stopPropagation();
       
       const elementData = JSON.parse(element.getAttribute('data-celiador-element') || '{}');
-      console.log('🎯 Celiador Element Clicked:', elementData);
       
-      // Send inspection data to parent window
+      // Enhance element data with real-time information
+      const rect = element.getBoundingClientRect();
+      const computedStyle = window.getComputedStyle(element);
+      
+      // Update bounding box with real coordinates
+      elementData.boundingBox = {
+        x: rect.left + window.scrollX,
+        y: rect.top + window.scrollY,
+        width: rect.width,
+        height: rect.height
+      };
+      
+      // Capture important computed styles
+      elementData.styles = {
+        display: computedStyle.display,
+        position: computedStyle.position,
+        backgroundColor: computedStyle.backgroundColor,
+        color: computedStyle.color,
+        fontSize: computedStyle.fontSize,
+        fontFamily: computedStyle.fontFamily,
+        fontWeight: computedStyle.fontWeight,
+        padding: computedStyle.padding,
+        margin: computedStyle.margin,
+        border: computedStyle.border,
+        borderRadius: computedStyle.borderRadius,
+        zIndex: computedStyle.zIndex,
+        opacity: computedStyle.opacity,
+        transform: computedStyle.transform,
+        boxShadow: computedStyle.boxShadow,
+        textAlign: computedStyle.textAlign,
+        lineHeight: computedStyle.lineHeight
+      };
+      
+      // Update current text content
+      elementData.textContent = element.textContent?.trim().substring(0, 200) || '';
+      
+      // Add accessibility information
+      elementData.accessibility = {
+        hasAriaLabel: !!element.getAttribute('aria-label'),
+        role: element.getAttribute('role'),
+        tabIndex: element.tabIndex,
+        isVisible: rect.width > 0 && rect.height > 0 && computedStyle.visibility !== 'hidden',
+        isFocusable: element.tabIndex >= 0 || ['INPUT', 'BUTTON', 'SELECT', 'TEXTAREA', 'A'].includes(element.tagName)
+      };
+      
+      // Enhance parent context with computed styles
+      if (elementData.context && elementData.context.parent && element.parentElement) {
+        const parentRect = element.parentElement.getBoundingClientRect();
+        const parentStyle = window.getComputedStyle(element.parentElement);
+        
+        elementData.context.parent.boundingBox = {
+          x: parentRect.left + window.scrollX,
+          y: parentRect.top + window.scrollY,
+          width: parentRect.width,
+          height: parentRect.height
+        };
+        elementData.context.parent.styles = {
+          display: parentStyle.display,
+          position: parentStyle.position,
+          backgroundColor: parentStyle.backgroundColor,
+          padding: parentStyle.padding
+        };
+      }
+      
+      console.log('🎯 Enhanced Celiador Element Data:', elementData);
+      
+      // Send enhanced inspection data to parent window
       if (window.parent !== window) {
         window.parent.postMessage({
           type: 'INSPECTION_ELEMENT_CLICKED',

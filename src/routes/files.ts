@@ -498,39 +498,59 @@ router.post('/projects/:id/files/save', authenticateUser, async (req: any, res: 
       return res.status(500).json({ error: 'Database not available' });
     }
 
-    console.log(`Saving file ${path} for project ${id}`);
+    console.log(`Saving file ${path} for project ${id} via UnifiedFileService`);
     
     try {
-      // SINGLE SOURCE OF TRUTH: Save to Supabase Storage only
-      // Encode path to handle special characters like brackets
-      const encodedPath = path.replace(/\[/g, '%5B').replace(/\]/g, '%5D');
-      
-      const { data, error } = await supabaseService.storage
-        .from('project-files')
-        .upload(`${id}/${encodedPath}`, content, {
-          contentType: getFileContentType(path),
-          upsert: true
-        });
+      // Use UnifiedFileService for dual storage (Database JSONB + Supabase Storage backup)
+      const { fileService } = await import('../services/unified-file-service.js');
+      const saveResult = await fileService.saveFile(id, path, content, req.user.id);
 
-      if (error) {
-        console.error('Storage save error:', error);
-        return res.status(500).json({ error: 'Failed to save file to storage' });
+      if (!saveResult.success) {
+        console.error('UnifiedFileService save error:', saveResult.error);
+        return res.status(500).json({ error: saveResult.error || 'Failed to save file' });
       }
 
       const result = {
         success: true,
         path,
-        size: content?.length || 0,
-        updatedAt: new Date().toISOString(),
-        storageKey: data.path
+        size: saveResult.size || content?.length || 0,
+        updatedAt: new Date().toISOString()
       };
       
-      console.log(`✅ [File Save] File ${path} updated in project ${id} storage`);
+      console.log(`✅ [File Save] File ${path} saved via UnifiedFileService for project ${id}`);
+      
+      // PHASE 2: Cache invalidation - clear preview cache when files are modified
+      try {
+        const fs = await import('fs/promises');
+        const pathModule = await import('path');
+        
+        // Find and clear matching preview cache directories
+        const tmpDir = '/tmp/celiador-previews';
+        const entries = await fs.readdir(tmpDir).catch(() => []);
+        
+        for (const entry of entries) {
+          if (entry.includes(id)) {
+            const previewPath = pathModule.join(tmpDir, entry);
+            const filePath = pathModule.join(previewPath, path);
+            
+            try {
+              await fs.unlink(filePath);
+              console.log(`🗑️ [Cache Invalidation] Cleared cached file: ${filePath}`);
+            } catch (unlinkError) {
+              // File might not exist in cache, that's ok
+              console.log(`📝 [Cache Invalidation] File not in cache: ${filePath}`);
+            }
+          }
+        }
+      } catch (cacheError) {
+        console.warn(`⚠️ [Cache Invalidation] Error clearing preview cache:`, cacheError);
+        // Don't fail the save operation due to cache clearing issues
+      }
       
       res.json(result);
-    } catch (storageError) {
-      console.error('Storage save failed:', storageError);
-      return res.status(500).json({ error: 'Failed to save file' });
+    } catch (serviceError) {
+      console.error('UnifiedFileService save failed:', serviceError);
+      return res.status(500).json({ error: 'Failed to save file via UnifiedFileService' });
     }
   } catch (error) {
     console.error('Failed to save file:', error);
