@@ -176,20 +176,49 @@ export class JobService {
       
       console.log(`📁 [SCAFFOLD] Using template: ${template.name} (${template.storage_path})`);
       
-      // Define paths
-      const templatesBaseDir = path.resolve('/Users/scw/Private/Programming/bether/templates');
+      // Define paths with environment-aware configuration
+      const templatesBaseDir = process.env.TEMPLATES_PATH || 
+        (process.env.NODE_ENV === 'production' 
+          ? path.resolve('./templates') 
+          : path.resolve('/Users/scw/Private/Programming/bether/templates'));
+      
       const templateDir = path.join(templatesBaseDir, template.storage_path);
-      const projectsBaseDir = path.resolve('/Users/scw/Private/Programming/bether/projects');
+      
+      const projectsBaseDir = process.env.PROJECTS_PATH || 
+        (process.env.NODE_ENV === 'production' 
+          ? path.resolve('./projects') 
+          : path.resolve('/Users/scw/Private/Programming/bether/projects'));
+      
       const projectDir = path.join(projectsBaseDir, job.projectId, templateKey);
       
       console.log(`📂 [SCAFFOLD] Template source: ${templateDir}`);
       console.log(`📂 [SCAFFOLD] Project destination: ${projectDir}`);
+      console.log(`📂 [SCAFFOLD] Environment: ${process.env.NODE_ENV || 'development'}`);
       
-      // Check if template directory exists
+      // Check if template directory exists, if not try to create from storage
+      let templateExists = false;
       try {
         await fs.access(templateDir);
+        templateExists = true;
+        console.log(`✅ [SCAFFOLD] Template directory found: ${templateDir}`);
       } catch (error) {
-        throw new Error(`Template directory not found: ${templateDir}`);
+        console.warn(`⚠️ [SCAFFOLD] Template directory not found: ${templateDir}`);
+        console.log(`🔄 [SCAFFOLD] Attempting to download template from Supabase Storage...`);
+        
+        // Try to download template from Supabase Storage as fallback
+        try {
+          const downloadSuccess = await this.downloadTemplateFromStorage(templateKey, templateDir);
+          if (downloadSuccess) {
+            templateExists = true;
+            console.log(`✅ [SCAFFOLD] Template downloaded from storage: ${templateDir}`);
+          }
+        } catch (downloadError) {
+          console.error(`❌ [SCAFFOLD] Failed to download template from storage:`, downloadError);
+        }
+      }
+      
+      if (!templateExists) {
+        throw new Error(`Template not available: ${templateKey}. Neither local directory nor storage backup found.`);
       }
       
       // Create project directory
@@ -476,5 +505,80 @@ export class JobService {
       'html': 'text/html'
     };
     return types[ext || ''] || 'text/plain';
+  }
+
+  /**
+   * Download template files from Supabase Storage and create local directory structure
+   * This is used as a fallback when template directories don't exist locally (production)
+   */
+  private async downloadTemplateFromStorage(templateKey: string, templateDir: string): Promise<boolean> {
+    console.log(`📥 [TEMPLATE DOWNLOAD] Starting download of template '${templateKey}' to '${templateDir}'`);
+    
+    try {
+      // List all files for this template in Supabase Storage
+      const { data: files, error: listError } = await this.supabaseService.storage
+        .from('templates')
+        .list(templateKey, { limit: 1000, sortBy: { column: 'name', order: 'asc' } });
+
+      if (listError) {
+        console.error(`❌ [TEMPLATE DOWNLOAD] Failed to list template files:`, listError);
+        return false;
+      }
+
+      if (!files || files.length === 0) {
+        console.warn(`⚠️ [TEMPLATE DOWNLOAD] No files found for template '${templateKey}'`);
+        return false;
+      }
+
+      console.log(`📁 [TEMPLATE DOWNLOAD] Found ${files.length} files for template '${templateKey}'`);
+
+      // Create template directory
+      await fs.mkdir(templateDir, { recursive: true });
+
+      // Download each file and recreate directory structure
+      let downloadedCount = 0;
+      for (const file of files) {
+        try {
+          // Skip directories (they have size 0 and no extension)
+          if (file.name.endsWith('/') || !file.name.includes('.')) {
+            continue;
+          }
+
+          const filePath = path.join(templateDir, file.name);
+          const fileDir = path.dirname(filePath);
+
+          // Create directory structure
+          await fs.mkdir(fileDir, { recursive: true });
+
+          // Download file content
+          const { data: fileData, error: downloadError } = await this.supabaseService.storage
+            .from('templates')
+            .download(`${templateKey}/${file.name}`);
+
+          if (downloadError) {
+            console.error(`❌ [TEMPLATE DOWNLOAD] Failed to download ${file.name}:`, downloadError);
+            continue;
+          }
+
+          // Convert blob to text
+          const fileContent = await fileData.text();
+
+          // Write file to local filesystem
+          await fs.writeFile(filePath, fileContent, 'utf-8');
+          downloadedCount++;
+          console.log(`✅ [TEMPLATE DOWNLOAD] Downloaded: ${file.name}`);
+
+        } catch (fileError) {
+          console.error(`❌ [TEMPLATE DOWNLOAD] Error processing file ${file.name}:`, fileError);
+        }
+      }
+
+      console.log(`🎉 [TEMPLATE DOWNLOAD] Successfully downloaded ${downloadedCount} files for template '${templateKey}'`);
+      return downloadedCount > 0;
+
+    } catch (error) {
+      console.error(`❌ [TEMPLATE DOWNLOAD] Failed to download template '${templateKey}':`, error);
+      return false;
+    }
   }
 }

@@ -72,7 +72,13 @@ router.post('/:projectId/migrate-files', authenticateUser, async (req, res) => {
 async function copyTemplateFilesToStorage(templateKey: string, projectId: string, supabaseService: any) {
   console.log(`📁 [TEMPLATE COPY] Starting template copy for ${templateKey} to project ${projectId}`);
   
-  const templatePath = path.resolve(`/Users/scw/Private/Programming/bether/templates/${templateKey}`);
+  // Use environment-aware template path
+  const templatesBaseDir = process.env.TEMPLATES_PATH || 
+    (process.env.NODE_ENV === 'production' 
+      ? path.resolve('./templates') 
+      : path.resolve('/Users/scw/Private/Programming/bether/templates'));
+  
+  const templatePath = path.join(templatesBaseDir, templateKey);
   
   try {
     // Check if template directory exists

@@ -6,7 +6,8 @@
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx src/index.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && npm run copy-templates",
+    "copy-templates": "node scripts/copy-templates.js",
     "start": "node dist/index.js",
     "lint": "eslint src/**/*.ts"
   },
