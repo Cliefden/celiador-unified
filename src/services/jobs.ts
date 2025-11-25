@@ -218,7 +218,10 @@ export class JobService {
       }
       
       if (!templateExists) {
-        throw new Error(`Template not available: ${templateKey}. Neither local directory nor storage backup found.`);
+        console.error(`❌ [SCAFFOLD] Template not available: ${templateKey}`);
+        console.log(`📍 [SCAFFOLD] Checked paths: ${templateDir}`);
+        console.log(`💡 [SCAFFOLD] Available templates should be bundled with deployment or in storage`);
+        throw new Error(`Template not available: ${templateKey}. Please ensure templates are properly deployed.`);
       }
       
       // Create project directory
@@ -515,9 +518,9 @@ export class JobService {
     console.log(`📥 [TEMPLATE DOWNLOAD] Starting download of template '${templateKey}' to '${templateDir}'`);
     
     try {
-      // List all files for this template in Supabase Storage
+      // List all files for this template in Supabase Storage (project-templates bucket)
       const { data: files, error: listError } = await this.supabaseService.storage
-        .from('templates')
+        .from('project-templates')
         .list(templateKey, { limit: 1000, sortBy: { column: 'name', order: 'asc' } });
 
       if (listError) {
@@ -526,7 +529,7 @@ export class JobService {
       }
 
       if (!files || files.length === 0) {
-        console.warn(`⚠️ [TEMPLATE DOWNLOAD] No files found for template '${templateKey}'`);
+        console.warn(`⚠️ [TEMPLATE DOWNLOAD] No files found for template '${templateKey}' in project-templates bucket`);
         return false;
       }
 
@@ -552,7 +555,7 @@ export class JobService {
 
           // Download file content
           const { data: fileData, error: downloadError } = await this.supabaseService.storage
-            .from('templates')
+            .from('project-templates')
             .download(`${templateKey}/${file.name}`);
 
           if (downloadError) {
